@@ -48,24 +48,24 @@ export function TwoFences() {
           Two independent fences.
         </h2>
         <p className="mt-5 text-body text-white/70">
-          Neither substitutes the other. One stops off-policy actions from ever broadcasting; the other polices
-          every spend that does.
+          Neither substitutes the other. One blocks off-policy requests before they&apos;re ever signed; the other
+          polices the spend on-chain.
         </p>
       </div>
 
       <div className="mt-12 grid gap-6 lg:grid-cols-2">
         <div data-aos="fade-up" data-aos-duration="550">
-          <FenceCard index="Fence 1" kicker="Gas layer" title="It can&apos;t even broadcast" icon={<Bolt />}>
-            The agent&apos;s account holds zero gas. Every action is a sponsored UserOp, and the paymaster&apos;s
-            off-chain signer only signs calls into the vault. An off-policy action is never sponsored - with no gas,
-            it never enters a bundle.
+          <FenceCard index="Fence 1" kicker="Server policy gate" title="It never gets signed" icon={<Bolt />}>
+            Every spend request is checked against the agent&apos;s leash - active, not expired, or allowlisted, per
+            service caps - before the executor key signs it. An off-policy request is rejected and logged at the
+            API, so value never leaves the vault.
           </FenceCard>
         </div>
         <div data-aos="fade-up" data-aos-delay="150" data-aos-duration="550">
           <FenceCard index="Fence 2" kicker="Contract layer" title="It only moves inside policy" icon={<Shield />}>
-            For any call that does get sponsored, the vault checks the full policy - active, not expired, token
-            allowed, target allowed, per-tx cap, daily cap, dedup - before moving a cent. Blocked actions emit an
-            on-chain record and move nothing.
+            Even if a request passes the API, the vault re-checks the full on-chain policy - active, token allowed,
+            target allowed, per-tx cap, daily cap, dedup - before moving a cent. Blocked actions emit an on-chain
+            record and move nothing.
           </FenceCard>
         </div>
       </div>

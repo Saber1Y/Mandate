@@ -6,7 +6,7 @@ const VAULT_ABI = parseAbi([
   "function executeSpend(address token, address target, uint256 amount, bytes data, bytes32 actionId) returns (bool)",
   "function executeSpendFor(address agent, address token, address target, uint256 amount, bytes data, bytes32 actionId) returns (bool)",
   "function setAgentPolicy(address agent, uint128 maxPerTx, uint128 dailyCap, uint64 expiry, bool active)",
-  "function setAllowedTarget(address agent, address target, bool allowed)",
+  "function setAllowedService(address agent, address target, string label, uint128 maxPerTx, uint128 dailyCap, uint64 expiry, bool allowed)",
   "function setAllowedToken(address agent, address token, bool allowed)",
   "function setExecutor(address executor, bool enabled)",
   "function deposit(uint256 amount)",
@@ -14,7 +14,7 @@ const VAULT_ABI = parseAbi([
   "function usdc() view returns (address)",
   "function getPolicy(address agent) view returns ((uint128 maxPerTx,uint128 dailyCap,uint128 spentToday,uint64 lastResetTime,uint64 expiry,bool active))",
   "function remainingDailyCap(address agent) view returns (uint256)",
-  "function allowedTarget(address agent,address target) view returns (bool)",
+  "function getService(address agent,address target) view returns ((bool allowed,string label,uint128 maxPerTx,uint128 dailyCap,uint128 spentToday,uint64 lastResetTime,uint64 expiry))",
   "function allowedToken(address agent,address token) view returns (bool)",
 ]);
 
@@ -118,24 +118,34 @@ export async function getVaultPolicy(vaultAddress: Address, agentAddress: Addres
   return {policy, remainingDailyCap: remaining as bigint};
 }
 
-export async function checkVaultAllowlist(vaultAddress: Address, agentAddress: Address, target: Address, token: Address) {
-  const client = createPublicClient({transport: http(ARC_RPC_URL)});
-  const [targetOk, tokenOk] = await Promise.all([
-    client.readContract({address: vaultAddress, abi: VAULT_ABI, functionName: "allowedTarget", args: [agentAddress, target]}),
-    client.readContract({address: vaultAddress, abi: VAULT_ABI, functionName: "allowedToken", args: [agentAddress, token]}),
-  ]);
-  return {targetAllowed: targetOk as boolean, tokenAllowed: tokenOk as boolean};
+export interface VaultService {
+  allowed: boolean;
+  label: string;
+  maxPerTx: bigint;
+  dailyCap: bigint;
+  spentToday: bigint;
+  lastResetTime: bigint;
+  expiry: bigint;
 }
 
-/** Read whether a vault allows `agent` to pay `target`. Used to verify a visitor-signed allowlist change before mirroring to the DB. */
-export async function getVaultAllowedTarget(vaultAddress: Address, agentAddress: Address, target: Address): Promise<boolean> {
+export async function checkVaultAllowlist(vaultAddress: Address, agentAddress: Address, target: Address, token: Address) {
+  const client = createPublicClient({transport: http(ARC_RPC_URL)});
+  const [targetPolicy, tokenOk] = await Promise.all([
+    client.readContract({address: vaultAddress, abi: VAULT_ABI, functionName: "getService", args: [agentAddress, target]}),
+    client.readContract({address: vaultAddress, abi: VAULT_ABI, functionName: "allowedToken", args: [agentAddress, token]}),
+  ]);
+  return {targetAllowed: (targetPolicy as VaultService).allowed, tokenAllowed: tokenOk as boolean, service: targetPolicy as VaultService};
+}
+
+/** Read the on-chain `serviceAllowlist` policy for `agent` paying `target`. Used to verify a visitor-signed allowlist change before mirroring to the DB. */
+export async function getVaultService(vaultAddress: Address, agentAddress: Address, target: Address): Promise<VaultService> {
   const client = createPublicClient({transport: http(ARC_RPC_URL)});
   return client.readContract({
     address: vaultAddress,
     abi: VAULT_ABI,
-    functionName: "allowedTarget",
+    functionName: "getService",
     args: [agentAddress, target],
-  }) as Promise<boolean>;
+  }) as Promise<VaultService>;
 }
 
 /**
@@ -186,30 +196,35 @@ export async function setAgentPolicyOnChain(vaultAddress: Address, agent: Addres
   }
 }
 
-/** Owner-only on-chain registration: create/set an agent's policy + allowlists. */
-export async function registerAgentOnChain(vaultAddress: Address, agent: Address, maxPerTx: bigint, dailyCap: bigint, token: Address, target: Address) {
+/** Owner-only on-chain registration: create/set an agent's policy + allowlists (self-target as a service). */
+export async function registerAgentOnChain(vaultAddress: Address, agent: Address, maxPerTx: bigint, dailyCap: bigint, token: Address, target: Address, label = "self") {
   const owner = getSigner("VAULT_OWNER_PRIVATE_KEY");
   const walletClient = createWalletClient({account: owner, transport: http(ARC_RPC_URL)});
   const publicClient = createPublicClient({transport: http(ARC_RPC_URL)});
 
-  const steps: {functionName: "setAgentPolicy" | "setAllowedToken" | "setAllowedTarget"; args: `0x${string}` | bigint | boolean}[] = [
-    {functionName: "setAgentPolicy", args: agent},
-    {functionName: "setAllowedToken", args: token},
-    {functionName: "setAllowedTarget", args: target},
-  ];
-
   const txHashes: Hex[] = [];
-  for (const step of steps) {
-    const calldata =
-      step.functionName === "setAgentPolicy"
-        ? encodeFunctionData({abi: VAULT_ABI, functionName: "setAgentPolicy", args: [agent, maxPerTx, dailyCap, 0n, true]})
-        : encodeFunctionData({abi: VAULT_ABI, functionName: step.functionName, args: [agent, step.args, true] as [Address, Address, boolean]});
-    const txHash = await walletClient.sendTransaction({to: vaultAddress, data: calldata, chain: undefined});
-    const receipt = await publicClient.waitForTransactionReceipt({hash: txHash, timeout: 60_000});
-    if (receipt.status !== "success") {
-      return {success: false, txHash, error: `${step.functionName} reverted on-chain`};
-    }
-    txHashes.push(txHash);
-  }
-  return {success: true, txHashes};
+
+  const setPolicy = encodeFunctionData({abi: VAULT_ABI, functionName: "setAgentPolicy", args: [agent, maxPerTx, dailyCap, 0n, true]});
+  const tx = await walletClient.sendTransaction({to: vaultAddress, data: setPolicy, chain: undefined});
+  const policyReceipt = await publicClient.waitForTransactionReceipt({hash: tx, timeout: 60_000});
+  if (policyReceipt.status !== "success") return {success: false as const, txHash: tx, error: "setAgentPolicy reverted on-chain"};
+  txHashes.push(tx);
+
+  const setToken = encodeFunctionData({abi: VAULT_ABI, functionName: "setAllowedToken", args: [agent, token, true]});
+  const tx2 = await walletClient.sendTransaction({to: vaultAddress, data: setToken, chain: undefined});
+  const tokenReceipt = await publicClient.waitForTransactionReceipt({hash: tx2, timeout: 60_000});
+  if (tokenReceipt.status !== "success") return {success: false as const, txHash: tx2, error: "setAllowedToken reverted on-chain"};
+  txHashes.push(tx2);
+
+  const setTarget = encodeFunctionData({
+    abi: VAULT_ABI,
+    functionName: "setAllowedService",
+    args: [agent, target, label, 0n, 0n, 0n, true],
+  });
+  const tx3 = await walletClient.sendTransaction({to: vaultAddress, data: setTarget, chain: undefined});
+  const targetReceipt = await publicClient.waitForTransactionReceipt({hash: tx3, timeout: 60_000});
+  if (targetReceipt.status !== "success") return {success: false as const, txHash: tx3, error: "setAllowedService reverted on-chain"};
+  txHashes.push(tx3);
+
+  return {success: true as const, txHashes};
 }

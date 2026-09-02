@@ -36,7 +36,9 @@ contract SpendArcVaultFactoryTest is Test {
         assertTrue(p.lastResetTime > 0);
         assertTrue(p.active);
         assertTrue(vault.allowedToken(alice, address(usdc)));
-        assertTrue(vault.allowedTarget(alice, alice));
+        SpendArcVault.ServiceAllowlist memory s = vault.getService(alice, alice);
+        assertTrue(s.allowed);
+        assertEq(s.label, "self");
     }
 
     function test_VaultsAreIsolated() public {
@@ -48,7 +50,7 @@ contract SpendArcVaultFactoryTest is Test {
         assertTrue(a != b);
         assertEq(SpendArcVault(payable(a)).owner(), alice);
         assertEq(SpendArcVault(payable(b)).owner(), bob);
-        assertFalse(SpendArcVault(payable(a)).allowedTarget(bob, bob));
+        assertFalse(SpendArcVault(payable(a)).getService(bob, bob).allowed);
         assertEq(factory.vaultCount(), 2);
     }
 

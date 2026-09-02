@@ -6,7 +6,7 @@ import {ArrowUpRight} from "@/components/ui/Icons";
 const links = [
   {label: "Vault factory", href: explorerAddress(CONTRACTS.factory)},
   {label: "USDC", href: explorerAddress(CONTRACTS.usdc)},
-  {label: "Explorer", href: "https://scan.bohr.life"},
+  {label: "Explorer", href: "https://testnet.arcscan.app"},
 ];
 
 export function SiteFooter() {

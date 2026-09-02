@@ -8,7 +8,8 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /// @notice Policy-enforcing spend vault for autonomous AI agents on Arc.
 ///         The vault holds USDC; a registered agent (or authorized executor) can only call
 ///         `executeSpend`, which moves value strictly inside its policy (active/expiry,
-///         token + target allowlists, per-tx cap, daily cap, actionId dedup).
+///         token + per-service target allowlists with per-service budgets, per-tx cap,
+///         daily cap, actionId dedup).
 ///         The owner configures the policy. An authorized executor (e.g. server key) can
 ///         call `executeSpend` on behalf of agents but cannot change policy or withdraw funds.
 contract SpendArcVault {
@@ -27,12 +28,26 @@ contract SpendArcVault {
         bool active;
     }
 
+    /// @notice Per-target (per-service) allowlist policy, mirroring the server-side
+    ///         control plane so both fences enforce the same per-service budget.
+    ///         `maxPerTx`/`dailyCap` of 0 mean no per-service limit; the global
+    ///         agent leash still backstops.
+    struct ServiceAllowlist {
+        bool allowed;
+        string label;
+        uint128 maxPerTx;
+        uint128 dailyCap;
+        uint128 spentToday;
+        uint64 lastResetTime;
+        uint64 expiry;
+    }
+
     address public immutable owner;
     address public immutable usdc;
     bool internal _locked;
 
     mapping(address agent => Policy) public policies;
-    mapping(address agent => mapping(address target => bool)) public allowedTarget;
+    mapping(address agent => mapping(address target => ServiceAllowlist)) public serviceAllowlist;
     mapping(address agent => mapping(address token => bool)) public allowedToken;
     mapping(bytes32 actionId => bool used) public usedAction;
     mapping(address executor => bool) public executors;
@@ -40,7 +55,15 @@ contract SpendArcVault {
     event VaultFunded(address indexed from, uint256 amount);
     event PolicyCreated(address indexed agent, uint128 maxPerTx, uint128 dailyCap, uint64 expiry, bool active);
     event PolicyUpdated(address indexed agent, uint128 maxPerTx, uint128 dailyCap, uint64 expiry, bool active);
-    event TargetAllowlisted(address indexed agent, address indexed target, bool allowed);
+    event ServiceAllowlisted(
+        address indexed agent,
+        address indexed target,
+        string label,
+        uint128 maxPerTx,
+        uint128 dailyCap,
+        uint64 expiry,
+        bool allowed
+    );
     event TokenAllowlisted(address indexed agent, address indexed token, bool allowed);
     event AgentRevoked(address indexed agent);
     event ExecutorSet(address indexed executor, bool enabled);
@@ -93,7 +116,17 @@ contract SpendArcVault {
         usdc = usdc_;
         if (executor_ != address(0)) executors[executor_] = true;
         if (usdc_ != address(0)) allowedToken[agent_][usdc_] = true;
-        if (target_ != address(0)) allowedTarget[agent_][target_] = true;
+        if (target_ != address(0)) {
+            serviceAllowlist[agent_][target_] = ServiceAllowlist({
+                allowed: true,
+                label: "self",
+                maxPerTx: 0,
+                dailyCap: 0,
+                spentToday: 0,
+                lastResetTime: uint64(block.timestamp),
+                expiry: 0
+            });
+        }
         policies[agent_] = Policy({
             maxPerTx: maxPerTx_,
             dailyCap: dailyCap_,
@@ -137,9 +170,31 @@ contract SpendArcVault {
         }
     }
 
-    function setAllowedTarget(address agent, address target, bool allowed) external onlyOwner {
-        allowedTarget[agent][target] = allowed;
-        emit TargetAllowlisted(agent, target, allowed);
+    /// @notice Set (or clear) a per-service allowlist policy for an agent. `maxPerTx_`/`dailyCap_`
+    ///         of 0 mean no per-service limit; the agent's global leash still applies. Setting
+    ///         `allowed = false` removes the service from the allowlist.
+    function setAllowedService(
+        address agent,
+        address target,
+        string calldata label,
+        uint128 maxPerTx,
+        uint128 dailyCap,
+        uint64 expiry,
+        bool allowed
+    ) external onlyOwner {
+        require(dailyCap == 0 || maxPerTx <= dailyCap, "maxPerTx exceeds dailyCap");
+        ServiceAllowlist storage s = serviceAllowlist[agent][target];
+        s.allowed = allowed;
+        s.label = label;
+        s.maxPerTx = maxPerTx;
+        s.dailyCap = dailyCap;
+        s.expiry = expiry;
+        s.lastResetTime = uint64(block.timestamp);
+        if (!allowed) {
+            s.spentToday = 0;
+            s.lastResetTime = uint64(block.timestamp);
+        }
+        emit ServiceAllowlisted(agent, target, label, maxPerTx, dailyCap, expiry, allowed);
     }
 
     function setAllowedToken(address agent, address token, bool allowed) external onlyOwner {
@@ -200,8 +255,17 @@ contract SpendArcVault {
             emit AgentActionBlocked(agent, target, token, amount, "token not allowlisted");
             return false;
         }
-        if (!allowedTarget[agent][target]) {
+        ServiceAllowlist storage s = serviceAllowlist[agent][target];
+        if (!s.allowed) {
             emit AgentActionBlocked(agent, target, token, amount, "target not allowlisted");
+            return false;
+        }
+        if (s.expiry != 0 && block.timestamp > s.expiry) {
+            emit AgentActionBlocked(agent, target, token, amount, "service allowlist expired");
+            return false;
+        }
+        if (s.maxPerTx != 0 && amount > s.maxPerTx) {
+            emit AgentActionBlocked(agent, target, token, amount, "exceeds service maxPerTx");
             return false;
         }
         if (amount > p.maxPerTx) {
@@ -219,6 +283,20 @@ contract SpendArcVault {
             emit AgentActionBlocked(agent, target, token, amount, "exceeds dailyCap");
             return false;
         }
+
+        // Per-service daily budget (rolling 24h), mirroring the server fence.
+        uint256 sSpent = s.spentToday;
+        uint64 sReset = s.lastResetTime;
+        if (s.dailyCap != 0) {
+            if (block.timestamp >= uint256(sReset) + DAY) {
+                sSpent = 0;
+                sReset = uint64(block.timestamp);
+            }
+            if (sSpent + amount > s.dailyCap) {
+                emit AgentActionBlocked(agent, target, token, amount, "exceeds service dailyCap");
+                return false;
+            }
+        }
         if (usedAction[actionId]) {
             emit AgentActionBlocked(agent, target, token, amount, "duplicate action");
             return false;
@@ -227,6 +305,8 @@ contract SpendArcVault {
         usedAction[actionId] = true;
         p.spentToday = uint128(spent + amount);
         p.lastResetTime = resetTime;
+        s.spentToday = uint128(sSpent + amount);
+        s.lastResetTime = sReset;
 
         if (token == NATIVE) {
             (bool ok,) = target.call{value: amount}(data);
@@ -269,7 +349,24 @@ contract SpendArcVault {
         return p.dailyCap - spent;
     }
 
+    function getService(address agent, address target) external view returns (ServiceAllowlist memory) {
+        return serviceAllowlist[agent][target];
+    }
+
+    function remainingServiceDailyCap(address agent, address target) external view returns (uint256) {
+        ServiceAllowlist memory s = serviceAllowlist[agent][target];
+        if (s.dailyCap == 0) return type(uint256).max;
+        uint256 spent = s.spentToday;
+        if (block.timestamp >= uint256(s.lastResetTime) + DAY) {
+            spent = 0;
+        }
+        if (spent >= s.dailyCap) {
+            return 0;
+        }
+        return s.dailyCap - spent;
+    }
+
     function isAllowed(address agent, address target, address token) external view returns (bool) {
-        return allowedTarget[agent][target] && allowedToken[agent][token];
+        return serviceAllowlist[agent][target].allowed && allowedToken[agent][token];
     }
 }

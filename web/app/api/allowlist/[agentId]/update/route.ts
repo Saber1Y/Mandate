@@ -9,7 +9,7 @@ export const dynamic = "force-dynamic";
 /**
  * Visitor self-service allowlist change for per-user vault agents.
  * The visitor owns their vault, so the server returns unsigned calldata for
- * `setAllowedTarget` that the visitor signs in their wallet; the DB mirror happens
+ * `setAllowedService` that the visitor signs in their wallet; the DB mirror happens
  * after confirmation via /api/allowlist/[agentId]/sync.
  */
 export async function POST(req: NextRequest, {params}: {params: Promise<{agentId: string}>}) {
@@ -39,12 +39,21 @@ export async function POST(req: NextRequest, {params}: {params: Promise<{agentId
   }
 
   const allowed = body.allowed !== false;
+  const label = body.label?.trim() || "service";
   const vault = agent.vault_address as Address;
   const short = `${address.slice(0, 8)}...${address.slice(-4)}`;
   const data = encodeFunctionData({
     abi: vaultAbi,
-    functionName: "setAllowedTarget",
-    args: [agent.address as Address, address as Address, allowed],
+    functionName: "setAllowedService",
+    args: [
+      agent.address as Address,
+      address as Address,
+      label,
+      BigInt(maxPerTxUsdc ?? 0),
+      BigInt(dailyCapUsdc ?? 0),
+      0n,
+      allowed,
+    ],
   });
 
   return NextResponse.json({
@@ -53,12 +62,12 @@ export async function POST(req: NextRequest, {params}: {params: Promise<{agentId
       data,
       value: "0",
       description: allowed
-        ? `Allow your agent to pay service ${short} from your vault ${vault}`
+        ? `Allow your agent to pay service ${label} (${short}) from your vault ${vault}`
         : `Remove service ${short} from your agent's payee allowlist on vault ${vault}`,
     },
     address,
     allowed,
-    label: body.label ?? "",
+    label,
     maxPerTxUsdc: maxPerTxUsdc != null ? maxPerTxUsdc / 1_000_000 : null,
     dailyCapUsdc: dailyCapUsdc != null ? dailyCapUsdc / 1_000_000 : null,
   });

@@ -15,9 +15,3 @@ via_ir = false
 line_length = 120
 tab_width = 4
 bracket_spacing = false
-
-[rpc_endpoints]
-bot_testnet = "https://rpc.bohr.life"
-
-[etherscan]
-bot_testnet = {key = "${SCAN_API_KEY}", url = "https://scan.bohr.life/api", chain = 968}

@@ -17,8 +17,9 @@ export const vaultAbi = parseAbi([
   // reads
   "function getPolicy(address agent) view returns ((uint128 maxPerTx,uint128 dailyCap,uint128 spentToday,uint64 lastResetTime,uint64 expiry,bool active))",
   "function remainingDailyCap(address agent) view returns (uint256)",
+  "function getService(address agent,address target) view returns ((bool allowed,string label,uint128 maxPerTx,uint128 dailyCap,uint128 spentToday,uint64 lastResetTime,uint64 expiry))",
+  "function remainingServiceDailyCap(address agent,address target) view returns (uint256)",
   "function isAllowed(address agent,address target,address token) view returns (bool)",
-  "function allowedTarget(address agent,address target) view returns (bool)",
   "function allowedToken(address agent,address token) view returns (bool)",
   "function usedAction(bytes32 actionId) view returns (bool)",
   "function owner() view returns (address)",
@@ -26,7 +27,7 @@ export const vaultAbi = parseAbi([
   "function NATIVE() view returns (address)",
   // owner writes
   "function setAgentPolicy(address agent,uint128 maxPerTx,uint128 dailyCap,uint64 expiry,bool active)",
-  "function setAllowedTarget(address agent,address target,bool allowed)",
+  "function setAllowedService(address agent,address target,string label,uint128 maxPerTx,uint128 dailyCap,uint64 expiry,bool allowed)",
   "function setAllowedToken(address agent,address token,bool allowed)",
   "function revokeAgent(address agent)",
   "function withdrawTokens(address token,address to,uint256 amount)",
@@ -43,7 +44,7 @@ export const vaultAbi = parseAbi([
   "event VaultFunded(address indexed from,uint256 amount)",
   "event PolicyCreated(address indexed agent,uint128 maxPerTx,uint128 dailyCap,uint64 expiry,bool active)",
   "event PolicyUpdated(address indexed agent,uint128 maxPerTx,uint128 dailyCap,uint64 expiry,bool active)",
-  "event TargetAllowlisted(address indexed agent,address indexed target,bool allowed)",
+  "event ServiceAllowlisted(address indexed agent,address indexed target,string label,uint128 maxPerTx,uint128 dailyCap,uint64 expiry,bool allowed)",
   "event TokenAllowlisted(address indexed agent,address indexed token,bool allowed)",
   "event AgentRevoked(address indexed agent)",
   "event ExecutorSet(address indexed executor,bool enabled)",

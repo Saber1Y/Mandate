@@ -1,8 +1,0 @@
-{
-  "_comment": "Replace paymaster/vault/registeredSenders with the Phase C deployment addresses. registeredSenders are SimpleAccount ADDRESSES (not owner EOAs). The verifyingSigner PRIVATE key is NOT here — it lives in the signer host env/secret; only its public address is the paymaster ctor arg.",
-  "chainId": "968",
-  "paymaster": "0x0000000000000000000000000000000000000000",
-  "vault": "0x0000000000000000000000000000000000000000",
-  "registeredSenders": [],
-  "checkInnerSelector": false
-}

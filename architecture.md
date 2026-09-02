@@ -2,8 +2,9 @@
 
 [← README](./README.md) · [Security](./security.md) · [Adversarial Testing](./adversarialtesting.md)
 
-SpendArc fences an autonomous agent with **two independent controls** — one at the gas layer
-(ERC-4337), one at the contract layer (the vault). Neither substitutes the other.
+SpendArc fences an autonomous agent with **two independent controls** — one at the server layer
+(policy evaluation before anything is signed), one at the contract layer (the vault re-checks every
+spend on-chain). Neither substitutes the other.
 
 ---
 
@@ -11,98 +12,105 @@ SpendArc fences an autonomous agent with **two independent controls** — one at
 
 ```mermaid
 flowchart LR
-    A[Agent<br/>SimpleAccount<br/>0 balance] -->|UserOp| B{Fence 1 · gas layer<br/>paymaster signer:<br/>execute→VAULT only?}
-    B -- no --> X[Not sponsored<br/>no gas → never bundled<br/>un-broadcastable]
-    B -- yes --> C[EntryPoint v0.7<br/>+ Skandha bundler]
+    A[Agent<br/>API key] -->|propose recipient + amount + purpose| B{Fence 1 · server<br/>evaluatePolicy:<br/>allowed? caps? dedup?}
+    B -- no --> X[Rejected<br/>nothing is ever signed<br/>never broadcast]
+    B -- yes --> C[Executor key<br/>signs + broadcasts<br/>executeSpendFor]
     C --> D{Fence 2 · contract layer<br/>SpendArcVault<br/>caps · allowlists · dedup}
     D -- pass --> E[transfer + AgentActionApproved + ReceiptIssued]
     D -- fail --> F[AgentActionBlocked · return false<br/>no revert · nothing moves]
 ```
 
-- **Fence 1 (gas)** decides *whether the action can be paid for*. It gates **destination**: the
-  off-chain signer only signs a UserOp whose calldata is `execute(dest = vault)` from a registered
-  agent account. Off-scope → no signature → no gas → not included.
-- **Fence 2 (the vault)** decides *whether value moves*. It gates **policy** and moves value only inside
-  it. A blocked action **emits an event and returns `false`** rather than reverting, so every decision is
-  a permanent on-chain artifact.
+- **Fence 1 (server)** decides *whether the request is worth signing*. It gates **policy**: the
+  executor's private key only ever signs a call to `SpendArcVault.executeSpendFor` after the server has
+  checked the agent's allowlist and budget against its own ledger. Off-policy → rejected → no signature
+  → never broadcast.
+- **Fence 2 (the vault)** decides *whether value moves*. It gates **policy** on-chain and moves value
+  only inside it. A blocked action **emits an event and returns `false`** rather than reverting, so every
+  decision is a permanent on-chain artifact.
 
-**The seam:** the signer does *not* pre-check spend policy. An over-cap call to the vault **is** sponsored
-(it targets the vault), then blocked on-chain by Fence 2 — the paymaster pays gas for that blocked action.
-This is a bounded, intentional tradeoff (see [security.md → F6](./security.md#f6--the-paymaster-pays-for-blocked-actions)).
+**The seam:** the server does *not* pre-check raw vault state. The vault independently re-reads the
+policy, service allowlist, caps, and `actionId` dedup at execution time, so a stale or inconsistent
+server ledger cannot move value off-policy.
 
 ## Components
 
 | Component | Role |
 |-----------|------|
-| **`SpendArcVault.sol`** | Fence 2. Holds funds, enforces per-agent policy (active/expiry, token + target allowlists, per-tx cap, rolling-24h daily cap, actionId dedup). ERC20-first (`SafeERC20`) + native path. No-revert-on-policy; hand-rolled reentrancy guard; checks-effects-interactions. |
-| **`SpendArcPaymaster.sol`** | Fence 1. Extends eth-infinitism `BasePaymaster` (v0.7); reproduces `VerifyingPaymaster.getHash`/`parsePaymasterAndData` **verbatim** and adds an immutable-`VAULT` destination gate. Validation is **storage-free** (reads only immutables, empty context). |
-| **SimpleAccount + Factory** (v0.7) | The agent's smart account. Holds nothing; only `execute`s. Counterfactual (CREATE2) address is where the vault policy is keyed. |
-| **Off-chain signer** (`client/src/signer.ts`) | The sponsor policy. Stateless: `sender ∈ registered accounts` AND `callData` decodes to `execute(dest = vault)` → sign the paymaster `getHash` over a short validity window; else refuse. Never reads vault state. |
-| **Agent client** (`client/src`) | Builds UserOps, packs v0.7 fields, computes `getHash`, submits via the bundler. |
-| **`MockUSD.sol`** | 6-decimal test stablecoin (no canonical testnet stablecoin exists; a real ERC20 on the live testnet). |
+| **`SpendArcVault.sol`** | Fence 2. Holds the owner's USDC, enforces per-agent policy (active/expiry, token + per-service allowlists, per-tx + rolling-24h daily caps, actionId dedup). ERC20-first (`SafeERC20`) + native path. No-revert-on-policy; hand-rolled reentrancy guard; checks-effects-interactions. |
+| **`SpendArcVaultFactory.sol`** | Deploys one isolated vault per wallet, so each user funds and owns its own. Pre-authorizes the platform executor (spend-within-policy only) and pre-registers the owner as the vault's single agent (`label: "self"`). |
+| **Server executor** (`web/lib/executor.ts` + `/api/...` routes) | Fence 1. Holds the `EXECUTOR_PRIVATE_KEY`, evaluates policy server-side, then signs/broadcasts `executeSpendFor`. The executor can spend only inside an agent's policy — it can never change policy, deposit, or withdraw. |
+| **Agent** | The owner's API key / wallet address (the vault's `agent` key in policy). It only *proposes* spends; it never holds or moves funds itself. |
+| **`MockUSD.sol`** | 6-decimal test stablecoin (used as the USDC stand-in in tests only; not deployed to the live network). |
+
+## On-chain allowlist (per service, not just per address)
+
+Allowlisting is no longer a binary true/false per target. Each entry is a small policy of its own:
+
+```
+struct ServiceAllowlist {
+    bool     allowed;      // whether the target can be paid at all
+    string   label;        // human name ("self", "Sim Analytics API", ...)
+    uint128  maxPerTx;     // 0 = no per-service per-tx limit (global leash still applies)
+    uint128  dailyCap;     // 0 = no per-service daily limit (global leash still applies)
+    uint128  spentToday;
+    uint64   lastResetTime;
+    uint64   expiry;
+}
+```
+
+`setAllowedService(agent, target, label, maxPerTx, dailyCap, expiry, allowed)` replaces the old binary
+`setAllowedTarget`-style flag. Caps are validated (`dailyCap == 0 || maxPerTx <= dailyCap`). The per-service daily
+budget rolls over on its own 24h window (`lastResetTime + DAY`), independently of the agent's global
+leash. A service entry with `maxPerTx = 0, dailyCap = 0` still passes the service layer and is bounded by
+the global policy caps backstop. The owner's own wallet is pre-seeded as `label: "self"`.
 
 ## Address model
 
-The registered "agent" is the **SimpleAccount address**, not its owner EOA.
-
 ```
-agent owner EOA   ──owns──▶  SimpleAccount (the agent)  ──msg.sender──▶  vault.executeSpend
-     │                              │
-   signs UserOps               registered in vault policy
-   (never holds funds)         registered in signer's sender set
+wallet owner EOA  ──funds+owns──▶  SpendArcVault (their vault)
+     │                                    │
+   owns vault                          msg.sender: owner or authorized executor
+   pre-registered as agent            executeSpendFor → _executeSpend(agent, ...)
 ```
 
-Policy, allowlists, and the paymaster's registered-sender set are all keyed on the **SimpleAccount
-address**. The owner EOA only signs UserOps. Data is keyed on the agent address throughout, so
-multi-agent is a config change, not a refactor.
+Policy and allowlists are keyed on the **agent address** throughout, so multi-agent is a config change,
+not a refactor. For a factory vault, owner == agent (the owner's wallet is its own agent). The executor is
+a **separate** role: spend-within-policy only.
 
-## UserOp lifecycle (the proven sequence)
+## Spend lifecycle (the proven sequence)
 
 ```mermaid
 sequenceDiagram
-    participant C as Agent client
-    participant S as Off-chain signer
-    participant O as Account owner key
-    participant B as Skandha bundler
-    participant E as EntryPoint v0.7
+    participant A as Agent (API key)
+    participant S as Server (policy eval + executor key)
     participant V as SpendArcVault
 
-    C->>C: build execute(vault, 0, executeSpend(...)) + freeze gas
-    C->>S: sponsor(op)  (sender registered? dest==vault?)
-    S-->>C: paymasterAndData (sig over getHash, [now-60, now+300])
-    C->>O: userOpHash = EntryPoint.getUserOpHash(packed op)
-    O-->>C: account-owner signature
-    C->>B: eth_sendUserOperation
-    B->>E: handleOps
-    E->>V: account.execute → vault.executeSpend
-    V-->>E: Approved (transfer + receipt)  |  Blocked (event, false)
-    E-->>B: UserOperationEvent(success=true)
+    A->>S: GET /api/agents/me  (introspect leash)
+    A->>S: POST /api/payments/request {recipient, amount, token, purpose}
+    S->>S: evaluatePolicy(agent, recipient, amount)  against allowlist ledger
+    S-->>A: rejected | accepted (with receipts)
+    S->>V: executeSpendFor(agent, token, target, amount, data, actionId) — signed by executor key
+    V-->>S: Approved (transfer + receipt) | Blocked (event, false — moves nothing)
+    S-->>A: receipts + event outcome (resolved on-chain, never optimistically)
 ```
 
-Two distinct digests, never crossed: the **signer** signs the paymaster `getHash`; the **account owner**
-signs the EntryPoint `userOpHash`.
+Fence 1 (server) and Fence 2 (vault) are **independent**: the vault does not trust the server's ledger,
+and the executor never signs for an off-policy request. `actionId` dedup is enforced on-chain, so the
+server's retry/resume logic cannot double-spend.
 
-### Gas fields freeze at signing
-
-`getHash` commits to *all* gas fields — `accountGasLimits`, `preVerificationGas`, `gasFees`, and the
-paymaster gas limits. So the client's sequence is **estimate → freeze → sign → submit unchanged**. Any
-field touched after signing makes the recovered signer ≠ `verifyingSigner` (silent rejection). The
-frontend's server route (`/api/sponsor`) floors `callGasLimit ≥ 250k` because the bundler's per-op
-breakdown is unreliable.
-
-## The three replay layers (kept separate)
+## Replay & idempotency
 
 | Layer | Guards | Mechanism |
 |-------|--------|-----------|
-| **EntryPoint nonce** | UserOp replay | 2D nonce in the EntryPoint |
-| **Paymaster window** | sponsorship replay | `validUntil`/`validAfter` (~5 min: skew 60s, ttl 300s) |
-| **Vault actionId** | spend replay | `usedAction[actionId]` dedup |
+| **Vault `actionId`** | spend replay | `usedAction[actionId]` dedup, on-chain |
+| **Server ledger** | policy state | allowlist entries + budget rows in the DB, reconciled against on-chain state on sync |
 
 ## EVM & tooling
 
-- `evm_version = cancun` (verified live: PUSH0/MCOPY/TLOAD/TSTORE execute; the canonical v0.7 EntryPoint —
-  which uses transient storage — is byte-identical to Ethereum mainnet at the same address on 968).
-- Deps: OpenZeppelin 5.x, `@account-abstraction/contracts@0.7.0` (tag), forge-std; solc 0.8.28.
+- `evm_version = cancun`; solc 0.8.28.
+- Deps: OpenZeppelin 5.x, forge-std.
+- No ERC-4337: no EntryPoint, no paymaster, no bundler, no user ops. The executor key signs and
+  broadcasts a plain contract call.
 
 See **[adversarialtesting.md](./adversarialtesting.md)** for how each of these is verified, and
 **[security.md](./security.md)** for the guarantees they provide.

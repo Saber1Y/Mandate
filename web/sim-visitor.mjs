@@ -20,7 +20,7 @@ const vaultAbi = parseAbi([
   "function deposit(uint256 amount)",
   "function withdrawTokens(address token,address to,uint256 amount)",
   "function getPolicy(address agent) view returns ((uint128 maxPerTx,uint128 dailyCap,uint128 spentToday,uint64 lastResetTime,uint64 expiry,bool active))",
-  "function allowedTarget(address agent,address target) view returns (bool)",
+  "function getService(address agent,address target) view returns ((bool allowed,string label,uint128 maxPerTx,uint128 dailyCap,uint128 spentToday,uint64 lastResetTime,uint64 expiry))",
 ]);
 
 const OPERATOR = "0x3F5b96A494061F7338Da529e3047809Ac6a7FB84";
@@ -144,10 +144,11 @@ async function main() {
     body: JSON.stringify({address: svc.address, allowed: true, label: "Sim Analytics API"}),
   })).json();
   console.log("allowlist sync:", JSON.stringify(alSync).slice(0, 200));
-  const onchainAllowed = await publicClient.readContract({
-    address: vault, abi: vaultAbi, functionName: "allowedTarget", args: [visitor, svc.address],
+  const onchainService = await publicClient.readContract({
+    address: vault, abi: vaultAbi, functionName: "getService", args: [visitor, svc.address],
   });
-  console.log("on-chain allowedTarget(agent, service):", onchainAllowed);
+  const onchainAllowed = onchainService.allowed;
+  console.log("on-chain service(agent, service):", {allowed: onchainAllowed, label: onchainService.label, maxPerTx: onchainService.maxPerTx.toString(), dailyCap: onchainService.dailyCap.toString()});
   const dbList = await (await fetch(`${BASE}/api/allowlist/${agentId}`, {headers: {authorization: `Bearer ${apiKey}`}})).json();
   console.log("server allowlist recipients:", JSON.stringify(dbList.recipients ?? dbList).slice(0, 300));
   if (!onchainAllowed) throw new Error("service not allowlisted on-chain");

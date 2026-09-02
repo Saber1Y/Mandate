@@ -1,14 +1,14 @@
 import {NextRequest, NextResponse} from "next/server";
 import {isAddress, type Address} from "viem";
 import {getAgent, listAllowlistEntries, addAllowlistEntry, removeAllowlistEntry, setAllowlistEntryPolicy} from "@/lib/db";
-import {getVaultAllowedTarget} from "@/lib/executor";
+import {getVaultService} from "@/lib/executor";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /**
  * After the visitor signs the allowlist change in their wallet, mirror the confirmed
- * on-chain `allowedTarget` state into the server store so both fences stay in sync.
+ * on-chain `serviceAllowlist` state into the server store so both fences stay in sync.
  * Verifies the vault actually reflects the requested value before writing.
  */
 export async function POST(req: NextRequest, {params}: {params: Promise<{agentId: string}>}) {
@@ -38,18 +38,29 @@ export async function POST(req: NextRequest, {params}: {params: Promise<{agentId
     return NextResponse.json({error: "Per-service per-tx budget cannot exceed its daily budget"}, {status: 400});
   }
 
-  let onchain: boolean;
+  let service: {allowed: boolean; label: string; maxPerTx: bigint; dailyCap: bigint; expiry: bigint};
   try {
-    onchain = await getVaultAllowedTarget(agent.vault_address as Address, agent.address as Address, address as Address);
+    service = await getVaultService(agent.vault_address as Address, agent.address as Address, address as Address);
   } catch {
     return NextResponse.json({error: "VAULT_READ_FAILED", message: "Could not read the vault allowlist on-chain."}, {status: 502});
   }
 
-  if (onchain !== allowed) {
+  const onchainMaxPerTx = maxPerTxUsdc == null ? 0n : BigInt(maxPerTxUsdc);
+  const onchainDailyCap = dailyCapUsdc == null ? 0n : BigInt(dailyCapUsdc);
+  if (service.allowed !== allowed) {
     return NextResponse.json(
       {
         error: "ONCHAIN_MISMATCH",
-        message: `On-chain allowlist does not match - the vault shows this service as ${onchain ? "allowed" : "not allowed"}.`,
+        message: `On-chain allowlist does not match - the vault shows this service as ${service.allowed ? "allowed" : "not allowed"}.`,
+      },
+      {status: 409},
+    );
+  }
+  if (allowed && (service.maxPerTx !== onchainMaxPerTx || service.dailyCap !== onchainDailyCap)) {
+    return NextResponse.json(
+      {
+        error: "ONCHAIN_MISMATCH",
+        message: "On-chain per-service budget does not match the requested caps. Confirm the transaction, then retry.",
       },
       {status: 409},
     );

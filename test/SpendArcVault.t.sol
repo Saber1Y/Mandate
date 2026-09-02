@@ -16,6 +16,7 @@ contract SpendArcVaultTest is Test {
     address target = makeAddr("target");
 
     function setUp() public {
+        vm.warp(1_700_000_000);
         usdc = new MockUSD();
         vm.prank(owner);
         vault = new SpendArcVault(owner, address(0), agent, 0, 0, 0, address(usdc), target);
@@ -83,7 +84,7 @@ contract SpendArcVaultTest is Test {
         vm.prank(owner);
         vault.setAllowedToken(inactive, address(usdc), true);
         vm.prank(owner);
-        vault.setAllowedTarget(inactive, target, true);
+        vault.setAllowedService(inactive, target, "inactive-svc", 0, 0, 0, true);
 
         vm.prank(executor);
         bool approved = vault.executeSpendFor(inactive, address(usdc), target, 1e6, "", keccak256("inactive"));
@@ -106,5 +107,64 @@ contract SpendArcVaultTest is Test {
         bool approved = vault.executeSpendFor(agent, address(usdc), target, 50e6, "", keccak256("caller-policy"));
         assertTrue(approved);
         assertEq(usdc.balanceOf(target), 50e6);
+    }
+
+    function test_Blocked_ExceedsServiceMaxPerTx() public {
+        vm.prank(owner);
+        vault.setAllowedService(agent, target, "backend", 10e6, 0, 0, true);
+        uint256 before = usdc.balanceOf(target);
+        vm.prank(executor);
+        bool approved = vault.executeSpendFor(agent, address(usdc), target, 11e6, "", keccak256("svc-big"));
+        assertFalse(approved);
+        assertEq(usdc.balanceOf(target), before);
+    }
+
+    function test_Blocked_ExceedsServiceDailyCap() public {
+        vm.prank(owner);
+        vault.setAllowedService(agent, target, "backend", 0, 30e6, 0, true);
+        spend(target, 20e6, keccak256("svc-1"));
+        vm.prank(executor);
+        bool approved = vault.executeSpendFor(agent, address(usdc), target, 15e6, "", keccak256("svc-2"));
+        assertFalse(approved);
+        assertEq(usdc.balanceOf(target), 20e6);
+    }
+
+    function test_ServiceDailyCapResets_AfterWindow() public {
+        vm.prank(owner);
+        vault.setAllowedService(agent, target, "backend", 0, 30e6, 0, true);
+        spend(target, 30e6, keccak256("svc-window-1"));
+        vm.warp(block.timestamp + 1 days + 1);
+        vm.prank(executor);
+        bool approved = vault.executeSpendFor(agent, address(usdc), target, 10e6, "", keccak256("svc-window-2"));
+        assertTrue(approved);
+        assertEq(usdc.balanceOf(target), 40e6);
+    }
+
+    function test_PerServiceBudgetDoesNotBindOtherTargets() public {
+        address other = makeAddr("other");
+        vm.prank(owner);
+        vault.setAllowedService(agent, other, "limited", 10e6, 0, 0, true);
+        vm.prank(executor);
+        bool approved = vault.executeSpendFor(agent, address(usdc), target, 90e6, "", keccak256("other-target"));
+        assertTrue(approved);
+    }
+
+    function test_Blocked_ServiceAllowlistExpired() public {
+        vm.prank(owner);
+        vault.setAllowedService(agent, target, "backend", 0, 0, uint64(block.timestamp - 1), true);
+        vm.prank(executor);
+        bool approved = vault.executeSpendFor(agent, address(usdc), target, 1e6, "", keccak256("expired-svc"));
+        assertFalse(approved);
+    }
+
+    function test_Revert_ServiceMaxPerTxExceedsDailyCap() public {
+        vm.prank(owner);
+        vm.expectRevert("maxPerTx exceeds dailyCap");
+        vault.setAllowedService(agent, target, "bad", 50e6, 10e6, 0, true);
+    }
+
+    function spend(address to, uint128 amount, bytes32 actionId) internal {
+        vm.prank(executor);
+        vault.executeSpendFor(agent, address(usdc), to, amount, "", actionId);
     }
 }
