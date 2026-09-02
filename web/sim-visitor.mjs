@@ -4,7 +4,7 @@ import {readFileSync, writeFileSync} from "fs";
 
 const RPC = "https://rpc.testnet.arc.network";
 const USDC = "0x3600000000000000000000000000000000000000";
-const FACTORY = "0x47ad98eec8c771d514e5576f7738d43ea91ef7c2";
+const FACTORY = "0x084c2061384bffd6254d1423e35b53ea91aaed87";
 const BASE = "http://localhost:3000";
 
 const factoryAbi = parseAbi([

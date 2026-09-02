@@ -60,8 +60,8 @@ RPC `https://rpc.testnet.arc.network` · Explorer `https://testnet.arcscan.app`
 
 | Contract | Address |
 |----------|---------|
-| **SpendArcVaultFactory** | [`0x47ad98eec8c771d514e5576f7738d43ea91ef7c2`](https://testnet.arcscan.app/address/0x47ad98eec8c771d514e5576f7738d43ea91ef7c2) |
-| **SpendArcVault (reference)** | [`0x0b860c25Dc6b2Df451AA66cFCdc7D6c6D7802F66`](https://testnet.arcscan.app/address/0x0b860c25Dc6b2Df451AA66cFCdc7D6c6D7802F66) |
+| **SpendArcVaultFactory** | [`0x084c2061384bffd6254d1423e35b53ea91aaed87`](https://testnet.arcscan.app/address/0x084c2061384bffd6254d1423e35b53ea91aaed87) |
+| **SpendArcVault (reference)** | [`0x82b7a7a401a5a94a6b5f55ec6aff3c8017633b56`](https://testnet.arcscan.app/address/0x82b7a7a401a5a94a6b5f55ec6aff3c8017633b56) |
 | **Operator / faucet** | [`0x3F5b96A494061F7338Da529e3047809Ac6a7FB84`](https://testnet.arcscan.app/address/0x3F5b96A494061F7338Da529e3047809Ac6a7FB84) |
 | **USDC (testnet)** | [`0x3600000000000000000000000000000000000000`](https://testnet.arcscan.app/address/0x3600000000000000000000000000000000000000) |
 
