@@ -1,17 +1,17 @@
 <div align="center">
 
-# SpendArc
+# Mandate
 
-**Agent Spending Control Plane**
+**Agent Spending Control Plane on BOT Chain**
 
-Policy-checked spend vaults for autonomous agents on **Arc testnet**. Anyone gets their own vault
-in minutes: pick a leash, fund it with USDC, and hand any AI agent a scoped API key. The agent holds
-nothing - a funded vault enforces caps, allowlists, daily limits and dedup on-chain, while a
-server-side policy gate blocks off-policy calls before they ever touch the chain.
+Policy-checked spend vaults for autonomous agents. Anyone gets their own vault in minutes: pick a
+leash, fund it with tUSDT, and hand any AI agent a scoped API key.
+The agent holds nothing - a funded vault enforces caps, allowlists, daily limits, approval
+thresholds and dedup on-chain, and every spend needs a human approval unless policy says otherwise.
 
-[Architecture](./architecture.md) · [Security](./security.md) · [Adversarial Testing](./adversarialtesting.md) · [Judge's Guide](./JUDGES.md)
+[Architecture](./architecture.md) · [Security](./security.md) · [Adversarial Testing](./adversarialtesting.md)
 
-`Arc testnet 5042002` · `Solidity` · `Foundry` · `Next.js` · `viem` · `MIT`
+`BOT Chain Bohr testnet 968` · `Solidity` · `Foundry` · `Next.js` · `viem` · `MIT`
 
 </div>
 
@@ -19,93 +19,93 @@ server-side policy gate blocks off-policy calls before they ever touch the chain
 
 ## The idea
 
-Autonomous agents need to move money to act - pay a vendor, settle a task, swap on a DEX. Hand one an
-unrestricted key and a single prompt injection, hallucinated action, or runaway loop can drain it.
+Autonomous agents need to move money to act - pay a vendor, settle a task, buy compute.
+Hand one an unrestricted key and a single prompt injection, hallucinated action, or runaway loop can
+drain it.
 
-SpendArc gives the agent a wallet that **holds nothing** and can only ever move value **inside policy**.
+Mandate gives the agent a key that **holds nothing** and can only ever move value **inside policy**.
 The product is self-serve:
 
-1. **Create your vault.** One signature deploys a vault owned by *your* wallet (via the
-   `SpendArcVaultFactory`, one vault per wallet). It is pre-configured with the leash you chose -
-   max per transaction, daily cap, expiry - and pre-allowlisted to USDC and your own address.
-2. **Fund it.** The built-in faucet tops up testnet gas + USDC; you deposit USDC into the vault.
-   The agent can only spend what is in the vault - it never holds a balance itself.
-3. **Hand your agent a key.** Register the agent and mint a one-time API key. Any AI agent (opencode,
-   ChatGPT, Claude) introspects its leash and makes payments inside it. The visitor owns the vault, so
-   tightening the leash or allowlisting a **third-party service** are signed in *their* wallet, then
-   mirrored to the server. Each allowed service can carry its own **per-service budget** (per-tx and
-   daily) enforced by the server fence on top of the vault's leash.
+1. **Create your vault.** One signature deploys a vault owned by *your* wallet (via
+   `MandateVaultFactory`, one vault per wallet). It is pre-configured with the leash you chose -
+   max per transaction, daily cap, expiry, approval threshold - and the owner is pre-registered as
+   the first agent so a treasury is usable immediately.
+2. **Fund it.** Deposit tUSDT into the vault. The agent can only spend what is in the vault - it
+   never holds a balance itself.
+3. **Hand your agent a key.** Register the agent address, set its policy, allowlist the tokens and
+   recipients it may pay, then issue a one-time API key. Any AI agent (opencode, Claude, ChatGPT)
+   introspects its leash through `GET /api/agents/me` and proposes spends inside it.
 
-Operators get a **fleet control plane** on top of the self-serve flow: every agent wallet in one view,
-per-agent leashes and balances, a full audit trail of every approved/blocked decision, and policy
-changes (lower a leash, revoke an agent) applied per agent from a single console.
+Every spend follows the same three-step path, and the **contract is the only authority**:
 
-Every payment is enforced by **two independent fences**:
+```mermaid
+sequenceDiagram
+    participant A as Agent (API key)
+    participant S as Server (gas-only relayer)
+    participant V as MandateVault
+    participant H as Org owner / approver
 
-- **Fence 1 - control plane (server).** Every payment request is checked against the app's policy store
-  (active, not expired, per-tx cap, daily cap, per-service budgets, recipient and token allowlists) before
-  anything is sent to
-  the chain. An off-policy request is answered with a structured `BLOCKED` decision and never broadcast.
-- **Fence 2 - contract layer (`SpendArcVault`).** Any `executeSpend` call is re-checked against the full
-  on-chain policy (active, expiry, token allowed, target allowed, per-tx cap, daily cap, dedup via a unique
-  `actionId`) **before** a single micro-unit of USDC moves. Blocked actions emit an on-chain
-  `AgentActionBlocked` record and move nothing - no revert, no state change.
+    A->>S: POST /api/requests {recipient, amount, idempotencyKey}
+    S->>V: requestSpend(...)  — relayed by the executor key
+    V-->>S: SpendRequested, status Pending
+    S-->>A: 201 {requestId, status: "Pending"}
+    H->>V: approve(requestId)  — signed in the org wallet
+    A->>S: POST /api/requests/{id}/execute
+    S->>V: execute(requestId)  — relayed by the executor key
+    V-->>S: RequestExecuted + ReceiptIssued
+    S-->>A: 200 {status: "Executed"}
+```
 
-Neither fence substitutes the other. See **[architecture.md](./architecture.md)** for the full design and
-**[security.md](./security.md)** for the guarantees and threat model.
+The server cannot approve anything, change policy, or move value on its own authority.
+It holds a gas-only key and may relay exactly two calls: `requestSpend` and `execute`.
+Both are re-validated on-chain, and `execute` still requires the request to be approved first.
 
-## Live on Arc testnet 5042002
+## Live on BOT Chain Bohr testnet (chain 968)
 
-RPC `https://rpc.testnet.arc.network` · Explorer `https://testnet.arcscan.app`
+RPC `https://rpc.bohr.life` · Explorer `https://scan.bohr.life`
 
 | Contract | Address |
 |----------|---------|
-| **SpendArcVaultFactory** | [`0x084c2061384bffd6254d1423e35b53ea91aaed87`](https://testnet.arcscan.app/address/0x084c2061384bffd6254d1423e35b53ea91aaed87) |
-| **SpendArcVault (reference)** | [`0x82b7a7a401a5a94a6b5f55ec6aff3c8017633b56`](https://testnet.arcscan.app/address/0x82b7a7a401a5a94a6b5f55ec6aff3c8017633b56) |
-| **Operator / faucet** | [`0x3F5b96A494061F7338Da529e3047809Ac6a7FB84`](https://testnet.arcscan.app/address/0x3F5b96A494061F7338Da529e3047809Ac6a7FB84) |
-| **USDC (testnet)** | [`0x3600000000000000000000000000000000000000`](https://testnet.arcscan.app/address/0x3600000000000000000000000000000000000000) |
+| **`MandateVaultFactory`** | [`0xcc9eAfFA4AB9108eB4E66952c420630D6340A719`](https://scan.bohr.life/address/0xcc9eAfFA4AB9108eB4E66952c420630D6340A719) |
+| **`MandateVault`** | [`0x45672a2cC6dfA5b975A6DBC5638C0154c01C85Be`](https://scan.bohr.life/address/0x45672a2cC6dfA5b975A6DBC5638C0154c01C85Be) |
+| **Owner / bootstrap executor** | [`0x3F5b96A494061F7338Da529e3047809Ac6a7FB84`](https://scan.bohr.life/address/0x3F5b96A494061F7338Da529e3047809Ac6a7FB84) |
+| **tUSDT (6 decimals)** | [`0x75edC9335175Fc0552D51D48439F229c10420fe3`](https://scan.bohr.life/address/0x75edC9335175Fc0552D51D48439F229c10420fe3) |
 
-Every visitor gets their own vault from the factory. The reference vault above is the shared/demo vault.
+The testnet deployment uses one EOA as both owner and executor, which is convenient for a demo but
+**not** the production shape - see [Security](./security.md).
 
 ### Proven on-chain artifacts
 
-Each demo run produces fresh, verifiable artifacts. The two historical receipts below are the classic
-same-agent-one-variable proof (an approved spend and a blocked spend against the same per-tx cap):
+A full agent lifecycle, with a separate agent address and an owner-signed approval:
 
-- **Approved spend** (1.5 USDC, under the 5 USDC per-tx cap): tx
-  [`0xa1295391…`](https://testnet.arcscan.app/tx/0xa12953915fba548cb16128bb53fa5c51c406f7d051a922db8dc0b2be3678ad5b)
-- **Blocked-by-policy** (6 USDC vs the 5 USDC cap - `AgentActionBlocked`, nothing moved): tx
-  [`0x892fa9cf…`](https://testnet.arcscan.app/tx/0x892fa9cf430c86a1fa5266ca2ca1b9617694ce1579fa223e672bf67c652fc81b)
+- **Request** (`requestSpend`, status `Pending`): tx
+  [`0xd5e65dfe…`](https://scan.bohr.life/tx/0xd5e65dfe63ea2fb3de758fdf81636ce52faa7d7186eba359344624fd3ae0ff5b)
+- **Owner approval** (`approve`, threshold reached): same request id
+  `0x33b66135e22dedce371a780923528be083c98516d73b84d4673cf209bd86c585`
+- **Settlement** (`execute`, `RequestExecuted` + `ReceiptIssued`): tx
+  [`0xd76b5c7b…`](https://scan.bohr.life/tx/0xd76b5c7bb9d1cb3a13dd00db26248c292f76606c45ed1be87bfefb643679d38a)
 
-The current run's artifacts (vault address, create-vault tx, deposit tx, visitor-signed
-`setAllowedService`/`setAgentPolicy` txs, approved + blocked spend txs) are collected in the
-recording flow. The marketing site reads the latest approved + blocked actions live on every
-page load.
-
-## Try it as a judge (no setup required)
-
-Open the live app and walk through the full flow in your own wallet - connect, create a
-vault with a leash, grab faucet funds, deposit USDC, register an agent, and hand the leash
-to a real AI agent. Every step is real and on-chain. See **[JUDGES.md](./JUDGES.md)** for
-the step-by-step walkthrough.
+Balances moved exactly as expected: vault `-1,000,000` base units, recipient `+1,000,000`.
+Attempting to execute before approval reverts `RequestNotApproved`; a second execute reverts
+`RequestFinalized`.
 
 ## Repository layout
 
 ```
-src/                      Solidity - SpendArcVaultFactory.sol, SpendArcVault.sol
-test/                     Foundry suite (unit + fork tests)
-script/                   deploy scripts (DeployFactoryArc, DeployArc, ...)
-client/                   TypeScript agent client (viem)
-web/                      Next.js frontend (marketing + dashboard + API routes)
+src/                      Solidity - MandateVault.sol, MandateVaultFactory.sol, MockUSD.sol
+test/                     Foundry suite (83 tests: unit + fuzz + authorization)
+script/                   deploy scripts (DeployMandateFactory, DeployMandateVault)
+web/                      Next.js app (marketing + dashboard + API routes)
 lib/                      vendored deps (OpenZeppelin, forge-std)
-JUDGES.md                 how to use the product on the live UI (for judges)
-QA.md                     the full end-to-end test flow
+architecture.md           components, authority model, spend lifecycle
+security.md               guarantees, threat model, key management
+adversarialtesting.md     how each control is verified
 ```
 
 ## Quick start
 
 ```bash
-# Contracts - build + test (Foundry)
+# Contracts - build + test
 forge build
 forge test
 
@@ -113,22 +113,21 @@ forge test
 cd web && npm install && npm run dev   # http://localhost:3000
 ```
 
-Copy `web/.env.example` to `web/.env.local` and fill in the Arc RPC, the factory and reference vault
-addresses, the Privy app ID, and the two signer keys (`EXECUTOR_PRIVATE_KEY` broadcasts vault spends;
-`VAULT_OWNER_PRIVATE_KEY` funds the faucet and configures the shared vault). The dashboard is fully
-live in read-only mode without them; owner-write controls need the owner wallet connected.
+Copy `web/.env.example` to `web/.env.local` and fill in the BOT RPC, factory and vault addresses,
+the Privy app ID, and `EXECUTOR_PRIVATE_KEY` (the gas-only relayer key).
+The dashboard reads live chain state without any secret configured; write controls require the
+organization wallet connected through Privy.
 
-The faucet grants **3 USDC + 0.05 ETH gas** per visitor (`/api/fund`) - enough for a full demo run.
-The demo is recorded against a fresh wallet each time, because the factory allows one vault per owner.
+```bash
+# Live API QA - run the real request/auth/policy suite against a running server
+cd web && node scripts/qa-agent.mjs --api-key mdt_...
+```
 
 ## Documentation
 
-- **[architecture.md](./architecture.md)** - the two fences, components, the payment lifecycle.
+- **[architecture.md](./architecture.md)** - components, authority model, spend lifecycle.
 - **[security.md](./security.md)** - guarantees, threat model, and key management.
-- **[adversarialtesting.md](./adversarialtesting.md)** - the test strategy: unit, differential fuzz,
-  fork-against-real-chain, and on-chain acceptance.
-- **[JUDGES.md](./JUDGES.md)** - how to use the product on the live UI, step by step.
-- **[QA.md](./QA.md)** - the full end-to-end test flow.
+- **[adversarialtesting.md](./adversarialtesting.md)** - unit, fuzz, and live on-chain acceptance.
 
 ## License
 

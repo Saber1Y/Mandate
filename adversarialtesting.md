@@ -2,8 +2,9 @@
 
 [← README](./README.md) · [Architecture](./architecture.md) · [Security](./security.md)
 
-Every claim in [security.md](./security.md) is backed by a test. The strategy runs from hermetic units up
-to live on-chain acceptance, deliberately trying to break each fence.
+Every claim in [security.md](./security.md) is backed by a test or a live transaction.
+The strategy runs from hermetic units up to live on-chain acceptance, deliberately trying to break
+each fence and each assumption in it.
 
 ---
 
@@ -11,65 +12,120 @@ to live on-chain acceptance, deliberately trying to break each fence.
 
 | Layer | What it proves | Where |
 |-------|----------------|-------|
-| Unit (Foundry) | Every policy branch + safety revert | `test/SpendArcVault.t.sol`, `test/SpendArcVaultFactory.t.sol` |
-| Live simulation gate | Factory deploy + vault spend trace cleanly | `web/sim-visitor.mjs` (e2e against the deployment) |
-| On-chain acceptance | Approved + blocked, live, with tx hashes | Arc testnet |
+| Unit + integration (Foundry) | Every policy branch, every safety revert, every authority boundary | `test/MandateVault.t.sol` (69), `test/MandateVaultFactory.t.sol` (14) |
+| ABI freshness | The frontend cannot drift from the deployed interface | `web` → `npm run check:abi` |
+| Type safety | No untyped contract surface reaches the UI | `web` → `npm run typecheck` |
+| Live API QA | Auth, validation, and on-chain rejection through the real HTTP surface | `web/scripts/qa-agent.mjs` |
+| On-chain acceptance | Full request → approval → settlement, with balance deltas | BOT Chain Bohr testnet, chain 968 |
 
-**Solidity: 23 tests.**
+**Solidity: 83 tests, 0 failing, 0 skipped.**
 
-## Vault — the policy surface (PRD scenarios 1–10 + more)
+## Vault — the policy surface
 
-`test/SpendArcVault.t.sol` isolates each blocked *reason* so the ordering can't mask a bug:
+`test/MandateVault.t.sol` isolates each blocked *reason* so ordering cannot mask a bug:
 
-- Approved spend → `AgentActionApproved` + `ReceiptIssued`, funds move, `spentToday` advances.
-- Blocked, one per reason: **exceeds global maxPerTx**, **service not allowlisted**, **token not
-  allowlisted**, **exceeds global dailyCap**, **exceeds service maxPerTx**, **exceeds service dailyCap**,
-  **agent not active** (revoked), **policy expired**, **service allowlist expired**, **duplicate action**
-  (replay).
-- **Per-service budget isolation:** a per-service daily cap on one target does not bind another target
-  (`test_PerServiceBudgetDoesNotBindOtherTargets`), and the per-service daily budget resets on its own
-  24h window (`test_ServiceDailyCapResets_AfterWindow`).
-- **Invariant enforcement:** `setAllowedService` with `maxPerTx > dailyCap` reverts
-  (`test_Revert_ServiceMaxPerTxExceedsDailyCap`).
-- **Reentrancy attempt:** a malicious ERC20 re-enters `executeSpend` during its transfer; the `nonReentrant`
-  guard fires (the nested call reverts) while the legitimate outer spend completes and no double-spend
-  occurs.
-- Native path (success + `NativeTransferFailed` safety revert), owner-guard reverts, rolling-24h daily
-  reset, unregistered-agent default-inactive.
+- **Settlement:** `test_ApprovedRequest_ExecutesAndMovesFunds`,
+  `test_PendingRequest_CannotExecuteBeforeApproval`,
+  `test_RejectedRequest_NeverSettlesAndIsTerminal`.
+- **Caps, one revert per reason:** `test_Revert_ExceedsPerTx`, `test_Revert_ExceedsDailyCap`,
+  `test_DailyCapResetsAfterWindow`, `test_Revert_ExpiredPolicy`, `test_Revert_ZeroAmount`,
+  `test_Revert_TokenNotAllowlisted`, `test_Revert_UnregisteredAgentCannotRequest`.
+- **Per-recipient budgets:** `test_RecipientPerTxCap`, `test_RecipientDailyCap`,
+  `test_RecipientBudgetsArePerRecipient`, `test_RecipientCapNotRequiredForUnlimitedRecipient`,
+  `test_RecipientWithoutDailyCapIsBoundedOnlyByAgentPolicy`,
+  `test_RemoveRecipientAllowlist_BlocksFutureSpends`.
+- **Multi-agent isolation on one treasury:** `test_AgentsHaveIsolatedBudgetsOnOneTreasury`,
+  `test_NewAgentDefaultsToNoAllowance`,
+  `test_OneRequestCannotBeFiledByAnotherAgentsKey`.
+- **Approval integrity:** `test_RaisingThresholdAfterRequestBlocksUnapprovedSettlement`,
+  `test_RaisingThresholdAboveRecordedApprovalsBlocksSettlement`,
+  `test_LoweringThresholdDoesNotRetroactivelyApproveAPendingRequest`,
+  `test_Revert_ApproverCannotApproveTwice`,
+  `test_Revert_ApproveAfterExecution`,
+  `test_ThresholdTwo_RequiresTwoDistinctApprovers`,
+  `test_Revert_ApproveRejectedByZeroThresholdGuard`.
+- **Approvals are not a free pass:** `test_ApprovalDoesNotSurvivePolicyRemoval` and
+  `test_ApprovalCannotExceedCapsAddedAfterApproval` prove the caps are re-read at execution time, so
+  tightening a leash after an approval still blocks the spend.
+- **Expiry and cancellation:** `test_ExpiredRequest_CannotExecuteEvenAfterApproval`,
+  `test_ExpiredRequest_CannotBeApprovedLate`, `test_ExpireRequestMarksTerminal`,
+  `test_CancelAfterApproval_BlocksExecution`, `test_CancelByAgent`,
+  `test_Revert_CannotCancelExecutedRequest`.
+- **Idempotency:** `test_IdempotentReplayReturnsSameRequest`,
+  `test_Revert_SameKeyDifferentAmountConflicts`, `test_Revert_SameKeyDifferentRecipientConflicts`,
+  `test_ComputeRequestIdIsPureAndVaultScoped`, `test_Revert_DoubleExecuteSameRequest`.
+- **Reentrancy:** `test_ReentrantExecute_CannotDoubleSpend` uses a malicious ERC20 that re-enters
+  `execute` during its transfer; the `nonReentrant` guard fires and no double-spend occurs.
+- **Arithmetic:** `test_LargeSpendIsNotTruncatedByNarrowingCast` guards the uint256 → uint128 casts
+  in the budget path.
+- **Pause scope:** `test_PauseBlocksNewRequestsAndExecution` and `test_PauseDoesNotLockOrgTreasury`
+  prove pausing stops agent spend without trapping the org's own funds.
+- **Auto-approval boundary:** `test_RequestAndExecute_WorksForZeroThresholdPolicy` and
+  `test_AutoApprovedPolicy_ExecutesWithoutHuman`, with the factory suite proving a non-zero threshold
+  cannot be short-circuited.
 
-Each asserts **events + state + balances**, not just a return value.
+Each test asserts **events + state + balances**, not just a return value.
 
 ## Factory layer
 
-`test/SpendArcVaultFactory.t.sol` proves the counterfactual contract: one vault per owner
-(`vaultOf`/`vaultByAgent`), the constructor seeds the owner as the single active agent
-(`getService(owner, owner).allowed` with `label == "self"`), an unregistered address is **not** the
-vault's agent (`getService(bob, bob).allowed == false`), and `createVault` enforces `maxPerTx <= dailyCap`.
+`test/MandateVaultFactory.t.sol` proves the counterfactual: one vault per org
+(`test_Revert_OneVaultPerOrg`), immutable deployer and executor
+(`test_DeployerAndExecutorAreImmutable`), role wiring (`test_CreateVaultWiresRolesToOrg`),
+full isolation between orgs (`test_OrgsGetFullyIsolatedVaults`,
+`test_OrgACannotConfigureOrgBTreasury`), and the executor's authority ceiling —
+`test_ExecutorCannotWithdrawOrgFunds`, `test_ExecutorCannotReconfigurePolicy`,
+`test_ExecutorCannotApprove`. It closes with a full factory-to-settlement path
+(`test_EndToEndApprovedSpendThroughFactory`) and confirms request ids are scoped per vault.
 
-## The live simulation gate
+## ABI and build integrity
 
-`web/sim-visitor.mjs` drives the full flow against the **live deployment** (Arc testnet): funds a fresh
-wallet, creates a vault via the factory, deposits, registers an agent, introspects the leash, makes an
-approved payment, allowlists a third-party service and pays it (verifying `getService` on-chain), edits
-the leash down, then proves an overspend is blocked. Every step resolves against the **actual emitted
-events and balances** (never optimistically).
+`npm run check:abi` regenerates `web/lib/abi/mandate.ts` from `src/` and fails if it differs, so a
+frontend built against a stale interface cannot ship silently.
+`npm run typecheck` covers the contract-facing TypeScript surface.
 
-## On-chain acceptance (live, Arc testnet)
+## Live API QA
 
-The fences are exercised for real, with matching before/after deltas:
+`web/scripts/qa-agent.mjs` exercises the real HTTP surface a third-party agent uses, asserting HTTP
+status **and** decoded contract error names - because the contract is the only authority, and a cache
+agreeing with itself proves nothing:
 
-- **Approved `executeSpendFor`** — a real transfer, `spentToday` advances, `AgentActionApproved` +
-  `ReceiptIssued` emitted, recipient's balance grows by exactly the amount.
-- **Blocked over-cap call** — `AgentActionBlocked` with the exact reason, **no** `Transfer`, both
-  balances unchanged, the block artifact is a permanent on-chain record.
-- **Allowlist sync** — the DB ledger is reconciled against `getService`/`remainingServiceDailyCap`
-  before the vault will pay a third-party service.
+- Auth: health responds unauthenticated; `/api/agents/me` requires a bearer key; a valid key returns
+  the on-chain policy.
+- Validation: non-address recipient, float amount, zero amount, malformed token, and missing
+  idempotency key each return 400 with a specific message.
+- On-chain policy: an over-cap amount reverts `InvalidPolicy`; an unallowlisted recipient reverts
+  `NotAuthorized`. Neither is decided by the server.
+- `--settle` creates a real request, proves `execute` reverts `RequestNotApproved` before approval,
+  and prints the exact owner `approve` and agent `execute` commands.
+
+Current run: **11 passed, 0 failed.**
+
+## On-chain acceptance (live, BOT Chain Bohr testnet 968)
+
+A separate agent address, a separate API key, and an owner-signed approval - with matching balance
+deltas read from the token contract:
+
+- **`requestSpend`** → `SpendRequested`, status `Pending`, request id
+  `0x33b66135…`. Tx
+  [`0xd5e65dfe…`](https://scan.bohr.life/tx/0xd5e65dfe63ea2fb3de758fdf81636ce52faa7d7186eba359344624fd3ae0ff5b)
+- **Early execute** → reverts `RequestNotApproved`. No transfer.
+- **Owner `approve`** → threshold of 1 reached, status `Approved`.
+- **`execute`** → `RequestExecuted` + `ReceiptIssued`, status `Executed`. Tx
+  [`0xd76b5c7b…`](https://scan.bohr.life/tx/0xd76b5c7bb9d1cb3a13dd00db26248c292f76606c45ed1be87bfefb643679d38a)
+  Vault `-1,000,000` base units, recipient `+1,000,000`.
+- **Double execute** → reverts `RequestFinalized`.
+- **Over service cap** → reverts `InvalidPolicy`, nothing moves.
+- **Credential lifecycle** → issue, rotate, and revoke all owner-signed; the replayed signature
+  returned 409, an expired signature 401, and an action-mismatched payload 401; a revoked key returned
+  403 on its next request.
 
 ### Failure modes are treated as first-class
 
-`success == false` is investigated, not shipped. Idempotency is respected throughout: `actionId` dedup
-is on-chain, so retries can't double-spend; outcomes are read from emitted events and chain state, never
-from optimistic client state.
+A failing `success == false` is investigated, not shipped.
+Two real bugs were found and fixed this way: the web `RequestStatus` enum was ordered differently
+from the contract, so a settled request reported as `Rejected`; and malformed input escaped the request
+handler as an empty HTTP 500.
+Outcomes are read from chain state and emitted events, never from optimistic client state.
 
-See [security.md](./security.md) for what each of these guarantees, and [architecture.md](./architecture.md)
+See [security.md](./security.md) for what each guarantee provides, and [architecture.md](./architecture.md)
 for the design under test.
