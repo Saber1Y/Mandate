@@ -1,6 +1,6 @@
 import {NextResponse} from "next/server";
 import type {Address} from "viem";
-import {BOT_CHAIN_ID, TUSDT_ADDRESS, mandateContracts, MissingMandateConfigError} from "@/lib/bot";
+import {BOT_CHAIN_ID, TUSDT_ADDRESS, mandateFactory, MissingMandateConfigError} from "@/lib/bot";
 import {publicClient} from "@/lib/chain";
 import {mandateVaultFactoryAbi} from "@/lib/abi/mandate";
 import {erc20Abi} from "@/lib/contracts";
@@ -18,14 +18,15 @@ export async function GET() {
     expectedChainId: BOT_CHAIN_ID,
   };
 
-  let contracts: {vault: Address; factory: Address} | null = null;
+  // No single vault is reported here. Which vault is live depends on who is asking, so a
+  // deployment-wide health check can only speak about the factory and the network.
+  let factory: Address | null = null;
   try {
-    contracts = mandateContracts();
-    report.vault = contracts.vault;
-    report.factory = contracts.factory;
+    factory = mandateFactory();
+    report.factory = factory;
   } catch (e) {
     report.configError =
-      e instanceof MissingMandateConfigError ? e.message : "Mandate contract addresses are not configured.";
+      e instanceof MissingMandateConfigError ? e.message : "Mandate factory address is not configured.";
   }
 
   try {
@@ -40,22 +41,17 @@ export async function GET() {
 
   report.tusdt = TUSDT_ADDRESS;
 
-  if (contracts) {
+  if (factory) {
     try {
-      const [vaultCode, factoryCode, tokenDecimals] = await Promise.all([
-        publicClient.getCode({address: contracts.vault}),
-        publicClient.getCode({address: contracts.factory}),
+      const [factoryCode, tokenDecimals, vaultCount, executor] = await Promise.all([
+        publicClient.getCode({address: factory}),
         publicClient.readContract({address: TUSDT_ADDRESS, abi: erc20Abi, functionName: "decimals"}),
+        publicClient.readContract({address: factory, abi: mandateVaultFactoryAbi, functionName: "vaultCount"}),
+        publicClient.readContract({address: factory, abi: mandateVaultFactoryAbi, functionName: "executor"}),
       ]);
-      report.vaultDeployed = !!vaultCode && vaultCode !== "0x";
       report.factoryDeployed = !!factoryCode && factoryCode !== "0x";
       report.tusdtDecimals = Number(tokenDecimals);
-
-      const executor = await publicClient.readContract({
-        address: contracts.factory,
-        abi: mandateVaultFactoryAbi,
-        functionName: "executor",
-      });
+      report.vaultCount = vaultCount.toString();
       report.executor = executor;
       report.relayerConfigured = !!process.env.EXECUTOR_PRIVATE_KEY;
     } catch (e) {
@@ -66,7 +62,7 @@ export async function GET() {
   const healthy =
     report.rpcReachable === true &&
     report.chainMismatch !== true &&
-    report.vaultDeployed === true &&
+    report.factoryDeployed === true &&
     report.tusdtDecimals === 6;
 
   return NextResponse.json({...report, healthy}, {status: healthy ? 200 : 503});

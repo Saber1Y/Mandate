@@ -1,6 +1,6 @@
 import {Logo} from "@/components/ui/Logo";
 import {explorerAddress} from "@/lib/chain";
-import {TUSDT_ADDRESS, BOT_EXPLORER_URL, mandateContracts} from "@/lib/bot";
+import {TUSDT_ADDRESS, BOT_EXPLORER_URL, mandateFactory} from "@/lib/bot";
 import {ArrowUpRight} from "@/components/ui/Icons";
 
 /**
@@ -12,8 +12,7 @@ import {ArrowUpRight} from "@/components/ui/Icons";
 function buildLinks(): {label: string; href: string}[] {
   const links: {label: string; href: string}[] = [{label: "Explorer", href: BOT_EXPLORER_URL}];
   try {
-    const {factory} = mandateContracts();
-    links.unshift({label: "Vault factory", href: explorerAddress(factory)});
+    links.unshift({label: "Vault factory", href: explorerAddress(mandateFactory())});
   } catch {
     // Not configured in this build; omit instead of linking a meaningless address.
   }
