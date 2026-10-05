@@ -42,15 +42,12 @@ function initSchema(db: Database.Database) {
       key_hash TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL,
       agent_address TEXT NOT NULL,
+      vault TEXT NOT NULL DEFAULT '',
       key_hint TEXT NOT NULL,
       revoked INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
       last_used_at INTEGER
     );
-    CREATE INDEX IF NOT EXISTS idx_agent_credentials_agent
-      ON agent_credentials (agent_id);
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_credentials_active_address
-      ON agent_credentials (agent_address) WHERE revoked = 0;
 
     -- Owner-signed authorizations are single-use. Storing the nonce makes a captured signature
     -- replayable for nothing, even inside its 5-minute validity window.
@@ -61,12 +58,72 @@ function initSchema(db: Database.Database) {
       created_at INTEGER NOT NULL
     );
   `);
+
+  // Order matters. An existing database still has the pre-multi-tenant table without a `vault`
+  // column, so anything that references `vault` - including CREATE INDEX - fails until the migration
+  // below has added it. Migrating first keeps a booted server from throwing on every request.
+  migrateAgentCredentials(db);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_agent_credentials_agent
+      ON agent_credentials (agent_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_credentials_vault
+      ON agent_credentials (vault);
+  `);
+}
+
+/**
+ * Bring a pre-multi-tenant database up to the current schema.
+ *
+ * The old unique index allowed exactly one live key per agent address across the whole deployment.
+ * That was only ever correct because there was a single vault: once a second org onboarded, two
+ * unrelated orgs could collide on the same agent address. The replacement index is per (vault,
+ * address), so the invariant that matters - one live key per agent per treasury - is preserved.
+ *
+ * Migrations are idempotent so this runs safely on every boot.
+ */
+function migrateAgentCredentials(db: Database.Database) {
+  const columns = db.prepare("PRAGMA table_info(agent_credentials)").all() as {
+    name: string;
+  }[];
+  const hasVault = columns.some((c) => c.name === "vault");
+  if (!hasVault) {
+    db.exec("ALTER TABLE agent_credentials ADD COLUMN vault TEXT NOT NULL DEFAULT ''");
+  }
+
+  // NOTE: libsql's `.get()` returns undefined for a missing row, not null. Checking `!== null` here
+  // would be true on a fresh database and silently skip creating the unique index, leaving agent
+  // keys unconstrained. Truthiness is the only correct test for this driver.
+  const hasVaultScopedIndex = Boolean(
+    db
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_agent_credentials_active_vault_address'")
+      .get(),
+  );
+  if (!hasVaultScopedIndex) {
+    db.exec("DROP INDEX IF EXISTS idx_agent_credentials_active_address");
+    db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_credentials_active_vault_address
+         ON agent_credentials (vault, agent_address) WHERE revoked = 0`,
+    );
+  }
+
+  // Rows created before multi-tenancy have an empty vault. They belong to the single vault this
+  // deployment shipped with, so backfill them from the legacy env var rather than stranding every
+  // existing agent key. If the var is absent the row stays empty and simply stops authenticating,
+  // which is the safe direction to fail in.
+  const legacyVault = process.env.MANDATE_VAULT_ADDRESS;
+  if (legacyVault && /^0x[0-9a-fA-F]{40}$/.test(legacyVault)) {
+    db.prepare("UPDATE agent_credentials SET vault = ? WHERE vault = '' OR vault IS NULL").run(
+      legacyVault.toLowerCase(),
+    );
+  }
 }
 
 function rowToCredential(row: Record<string, unknown>): AgentCredential {
   return {
     agentId: String(row.agent_id),
     agentAddress: String(row.agent_address) as AgentCredential["agentAddress"],
+    vault: String(row.vault ?? "") as AgentCredential["vault"],
     keyHash: String(row.key_hash),
     keyHint: String(row.key_hint),
     revoked: Number(row.revoked) === 1,
@@ -90,23 +147,25 @@ export async function findCredentialByHash(keyHash: string): Promise<AgentCreden
 export async function issueAgentKey(params: {
   agentId: string;
   agentAddress: string;
+  vault: string;
 }): Promise<{credential: AgentCredential; plaintext: string}> {
   const {plaintext, keyHash, keyHint} = generateAgentKey();
   const createdAt = Date.now();
   const address = params.agentAddress.toLowerCase();
+  const vault = params.vault.toLowerCase();
   try {
     getDb()
       .prepare(
-        `INSERT INTO agent_credentials (key_hash, agent_id, agent_address, key_hint, revoked, created_at)
-         VALUES (?, ?, ?, ?, 0, ?)`,
+        `INSERT INTO agent_credentials (key_hash, agent_id, agent_address, vault, key_hint, revoked, created_at)
+         VALUES (?, ?, ?, ?, ?, 0, ?)`,
       )
-      .run(keyHash, params.agentId, address, keyHint, createdAt);
+      .run(keyHash, params.agentId, address, vault, keyHint, createdAt);
   } catch (e) {
-    // One live key per agent address is a deliberate invariant: a second live key for the same
+    // One live key per agent per vault is a deliberate invariant: a second live key for the same
     // address doubles the blast radius of a leak without adding any capability.
-    if (String(e).includes("UNIQUE constraint failed: agent_credentials.agent_address")) {
+    if (String(e).includes("UNIQUE constraint failed")) {
       throw new Error(
-        "That agent address already has an active key. Use rotate to replace it, or revoke first.",
+        "That agent address already has an active key on this vault. Use rotate to replace it, or revoke first.",
       );
     }
     throw e;
@@ -117,6 +176,7 @@ export async function issueAgentKey(params: {
     credential: {
       agentId: params.agentId,
       agentAddress: address as AgentCredential["agentAddress"],
+      vault: vault as AgentCredential["vault"],
       keyHash,
       keyHint,
       revoked: false,
@@ -130,28 +190,40 @@ export async function issueAgentKey(params: {
  * Rotate: revoke every existing key for the agent and issue a fresh one. Single-step rotation means
  * an operator can never end up with an unknown number of live keys.
  */
-export async function rotateAgentKeys(agentId: string): Promise<{credential: AgentCredential; plaintext: string}> {
+export async function rotateAgentKeys(params: {
+  agentId: string;
+  vault: string;
+}): Promise<{credential: AgentCredential; plaintext: string}> {
+  const {agentId, vault} = params;
   const db = getDb();
-  db.prepare("UPDATE agent_credentials SET revoked = 1 WHERE agent_id = ? AND revoked = 0").run(agentId);
+  const v = vault.toLowerCase();
+  // Scoped to one vault: revoking "research-agent" on org A's treasury must not touch org B's key
+  // for an agent that happens to share the id.
+  db.prepare("UPDATE agent_credentials SET revoked = 1 WHERE agent_id = ? AND vault = ? AND revoked = 0").run(
+    agentId,
+    v,
+  );
   const row = db
-    .prepare("SELECT agent_address FROM agent_credentials WHERE agent_id = ? ORDER BY created_at DESC LIMIT 1")
-    .get(agentId) as {agent_address?: string} | undefined;
+    .prepare(
+      "SELECT agent_address FROM agent_credentials WHERE agent_id = ? AND vault = ? ORDER BY created_at DESC LIMIT 1",
+    )
+    .get(agentId, v) as {agent_address?: string} | undefined;
 
   const agentAddress =
     row?.agent_address ??
-    (db.prepare("SELECT agent_address FROM agent_credentials WHERE agent_id = ?").get(agentId) as
-      | {agent_address?: string}
-      | undefined)?.agent_address;
+    (db
+      .prepare("SELECT agent_address FROM agent_credentials WHERE agent_id = ? AND vault = ?")
+      .get(agentId, v) as {agent_address?: string} | undefined)?.agent_address;
 
-  if (!agentAddress) throw new Error(`No credential exists for agent ${agentId}; cannot rotate.`);
-  return issueAgentKey({agentId, agentAddress});
+  if (!agentAddress) throw new Error(`No credential exists for agent ${agentId} on this vault; cannot rotate.`);
+  return issueAgentKey({agentId, agentAddress, vault: v});
 }
 
-/** Revoke every key for an agent. The agent can no longer call the API, but its on-chain policy is untouched. */
-export async function revokeAgentKeys(agentId: string): Promise<number> {
+/** Revoke every key for an agent on one vault. The agent can no longer call the API, but its on-chain policy is untouched. */
+export async function revokeAgentKeys(params: {agentId: string; vault: string}): Promise<number> {
   const result = getDb()
-    .prepare("UPDATE agent_credentials SET revoked = 1 WHERE agent_id = ? AND revoked = 0")
-    .run(agentId);
+    .prepare("UPDATE agent_credentials SET revoked = 1 WHERE agent_id = ? AND vault = ? AND revoked = 0")
+    .run(params.agentId, params.vault.toLowerCase());
   return Number(result.changes ?? 0);
 }
 
