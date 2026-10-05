@@ -1,8 +1,8 @@
 "use client";
 
 import {useCallback, useEffect, useState} from "react";
-import {TUSDT_ADDRESS, mandateContracts} from "@/lib/bot";
-import {bytesToHex} from "viem";
+import {TUSDT_ADDRESS} from "@/lib/bot";
+import {bytesToHex, type Address} from "viem";
 import {mandateVaultAbi} from "@/lib/abi/mandate";
 import {parseTusdt} from "@/lib/contracts";
 import {isSameAddress, truncateAddress, formatExpiry} from "@/lib/format";
@@ -12,6 +12,7 @@ import {useOwnerWrite} from "@/lib/useOwnerWrite";
 import {useWalletMessageSigner} from "@/lib/usePrivyWallet";
 import {credentialAuthorizationMessage, type CredentialAction} from "@/lib/credentialAuth";
 import {useRole} from "@/lib/useRole";
+import {useVault} from "@/lib/useVault";
 import {Panel, PanelNote} from "@/components/dashboard/Panel";
 import {DailyCapMeter} from "@/components/dashboard/DailyCapMeter";
 import {Button} from "@/components/ui/Button";
@@ -28,7 +29,8 @@ import {PageLoader} from "@/components/ui/PageLoader";
  * backend cannot register an agent, widen a limit, or spend, by construction.
  */
 export default function AgentsPage() {
-  const treasury = useTreasuryState();
+  const {vault} = useVault();
+  const treasury = useTreasuryState(vault);
   const {isOwner} = useRole();
 
   const [address, setAddress] = useState("");
@@ -44,7 +46,9 @@ export default function AgentsPage() {
       return;
     }
     try {
-      const {vault} = mandateContracts();
+      // The session is scoped to one vault by the layout, so look the agent up there rather than
+      // in whatever treasury happened to be configured for this build.
+      if (!vault) throw new Error("No vault for this wallet.");
       const registered = await publicClient.readContract({
         address: vault,
         abi: mandateVaultAbi,
@@ -94,29 +98,31 @@ export default function AgentsPage() {
             <Button onClick={lookup}>Look up</Button>
           </div>
           {lookupError ? <p className="mt-2 text-[12px] text-state-blocked">{lookupError}</p> : null}
-          {resolved ? <AgentEditor agent={resolved as `0x${string}`} onChanged={treasury.refetch} /> : null}
+          {resolved ? (
+            <AgentEditor vault={vault!} agent={resolved as `0x${string}`} onChanged={treasury.refetch} />
+          ) : null}
         </Panel>
 
         <Panel title="Register an agent" subtitle="Bind an address the agent may spend as">
-          <RegisterAgent onChanged={treasury.refetch} disabled={!isOwner} />
+          <RegisterAgent vault={vault!} onChanged={treasury.refetch} disabled={!isOwner} />
         </Panel>
 
         <Panel title="Executors" subtitle="Addresses allowed to settle approved requests">
-          <ExecutorManager onChanged={treasury.refetch} disabled={!isOwner} />
+          <ExecutorManager vault={vault!} onChanged={treasury.refetch} disabled={!isOwner} />
         </Panel>
 
         <Panel
           title="API credentials"
           subtitle="Issue, rotate or revoke the key an agent uses to call the API"
         >
-          <CredentialManager agent={resolved as `0x${string}` | undefined} disabled={!isOwner} />
+          <CredentialManager vault={vault!} agent={resolved as `0x${string}` | undefined} disabled={!isOwner} />
         </Panel>
       </div>
     </div>
   );
 }
 
-function AgentEditor({agent, onChanged}: {agent: `0x${string}`; onChanged: () => void}) {
+function AgentEditor({vault, agent, onChanged}: {vault: Address; agent: `0x${string}`; onChanged: () => void}) {
   const [state, setState] = useState<{
     active: boolean;
     maxPerTx: bigint;
@@ -139,7 +145,6 @@ function AgentEditor({agent, onChanged}: {agent: `0x${string}`; onChanged: () =>
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const {vault} = mandateContracts();
       const [policy, remaining, tokenAllowed] = await Promise.all([
         publicClient.readContract({address: vault, abi: mandateVaultAbi, functionName: "getPolicy", args: [agent]}),
         publicClient.readContract({address: vault, abi: mandateVaultAbi, functionName: "remainingDailyCap", args: [agent]}),
@@ -226,7 +231,7 @@ function AgentEditor({agent, onChanged}: {agent: `0x${string}`; onChanged: () =>
               : 0n;
 
           void savePolicy.run({
-            address: mandateContracts().vault,
+            address: vault,
             abi: mandateVaultAbi,
             functionName: "setAgentPolicy",
             args: [
@@ -271,7 +276,7 @@ function AgentEditor({agent, onChanged}: {agent: `0x${string}`; onChanged: () =>
           disabled={setToken.pending}
           onClick={() =>
             setToken.run({
-              address: mandateContracts().vault,
+              address: vault,
               abi: mandateVaultAbi,
               functionName: "setAllowedToken",
               args: [agent, TUSDT_ADDRESS, !state.tokenAllowed],
@@ -286,7 +291,7 @@ function AgentEditor({agent, onChanged}: {agent: `0x${string}`; onChanged: () =>
   );
 }
 
-function RegisterAgent({onChanged, disabled}: {onChanged: () => void; disabled: boolean}) {
+function RegisterAgent({vault, onChanged, disabled}: {vault: Address; onChanged: () => void; disabled: boolean}) {
   const [agent, setAgent] = useState("");
   const write = useOwnerWrite(onChanged);
   const [error, setError] = useState<string | undefined>();
@@ -303,7 +308,7 @@ function RegisterAgent({onChanged, disabled}: {onChanged: () => void; disabled: 
         }
         setError(undefined);
         void write.run({
-          address: mandateContracts().vault,
+          address: vault,
           abi: mandateVaultAbi,
           functionName: "setAgent",
           args: [candidate as `0x${string}`, true],
@@ -325,7 +330,7 @@ function RegisterAgent({onChanged, disabled}: {onChanged: () => void; disabled: 
   );
 }
 
-function ExecutorManager({onChanged, disabled}: {onChanged: () => void; disabled: boolean}) {
+function ExecutorManager({vault, onChanged, disabled}: {vault: Address; onChanged: () => void; disabled: boolean}) {
   const [address, setAddress] = useState("");
   const write = useOwnerWrite(onChanged);
   const [error, setError] = useState<string | undefined>();
@@ -343,7 +348,7 @@ function ExecutorManager({onChanged, disabled}: {onChanged: () => void; disabled
           }
           setError(undefined);
           void write.run({
-            address: mandateContracts().vault,
+            address: vault,
             abi: mandateVaultAbi,
             functionName: "setExecutor",
             args: [candidate as `0x${string}`, true],
@@ -374,7 +379,7 @@ function ExecutorManager({onChanged, disabled}: {onChanged: () => void; disabled
  * from the chain, and only then does a key exist. The plaintext is rendered once and never
  * re-fetchable, which is the same property the SpendArc dashboard lacked entirely.
  */
-function CredentialManager({agent, disabled}: {agent?: `0x${string}`; disabled: boolean}) {
+function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0x${string}`; disabled: boolean}) {
   const {signMessage} = useWalletMessageSigner();
   const [agentId, setAgentId] = useState("");
   const [busy, setBusy] = useState<CredentialAction | null>(null);
@@ -401,6 +406,9 @@ function CredentialManager({agent, disabled}: {agent?: `0x${string}`; disabled: 
         action,
         agentId: id,
         agentAddress: agent,
+        // Signed explicitly so the server can confirm the signer really owns this treasury. See
+        // verifyCredentialAuthorization: it refuses a signature naming someone else's vault.
+        vault,
         issuedAt: Math.floor(Date.now() / 1000),
         // Nonce makes two signatures for the same second distinguishable; it is bound into the
         // signed bytes, so a replayed request still needs its own fresh signature.

@@ -2,7 +2,7 @@
 
 import {useEffect, useMemo, useState} from "react";
 import type {Address} from "viem";
-import {mandateContracts, TUSDT_ADDRESS} from "@/lib/bot";
+import {TUSDT_ADDRESS} from "@/lib/bot";
 import {mandateVaultAbi} from "@/lib/abi/mandate";
 import {publicClient} from "@/lib/chain";
 import {
@@ -16,6 +16,7 @@ import {explorerTx} from "@/lib/chain";
 import {useSpendHistory} from "@/lib/useChainRead";
 import {useActiveAddress} from "@/lib/usePrivyWallet";
 import {useRole} from "@/lib/useRole";
+import {useVault} from "@/lib/useVault";
 import {requestStatusName} from "@/lib/contracts";
 import {useOwnerWrite} from "@/lib/useOwnerWrite";
 import {Panel, PanelNote} from "@/components/dashboard/Panel";
@@ -61,7 +62,8 @@ interface RequestRow {
  * re-validates the full policy at that moment.
  */
 export default function RequestsPage() {
-  const history = useSpendHistory({limit: 60});
+  const {vault} = useVault();
+  const history = useSpendHistory({vault, limit: 60});
   const {address} = useActiveAddress();
   const {isOwner, isApprover} = useRole();
 
@@ -71,7 +73,7 @@ export default function RequestsPage() {
   );
   const executed = useMemo(() => (history.data ?? []).filter((e) => e.kind === "executed"), [history.data]);
 
-  const rows = useRequestRows(requestedIds, executed);
+  const rows = useRequestRows(vault, requestedIds, executed);
 
   if (history.loading) return <PageLoader label="Reading request events from BOT Chain..." fill />;
 
@@ -107,6 +109,7 @@ export default function RequestsPage() {
             <div className="space-y-3">
               {actionable.map((r) => (
                 <RequestCard
+                  vault={vault!}
                   key={r.requestId}
                   request={r}
                   canApprove={canApprove}
@@ -124,7 +127,7 @@ export default function RequestsPage() {
           ) : (
             <div className="space-y-2">
               {settled.map((r) => (
-                <ClosedRow key={r.requestId} request={r} onChanged={history.refetch} />
+                <ClosedRow key={r.requestId} vault={vault!} request={r} onChanged={history.refetch} />
               ))}
             </div>
           )}
@@ -135,11 +138,13 @@ export default function RequestsPage() {
 }
 
 function RequestCard({
+  vault,
   request,
   canApprove,
   canCancel,
   onChanged,
 }: {
+  vault: Address;
   request: RequestRow;
   canApprove: boolean;
   canCancel: boolean;
@@ -196,7 +201,7 @@ function RequestCard({
                 disabled={approve.pending || expired}
                 onClick={() =>
                   approve.run({
-                    address: mandateContracts().vault,
+                    address: vault,
                     abi: mandateVaultAbi,
                     functionName: "approve",
                     args: [request.requestId],
@@ -224,7 +229,7 @@ function RequestCard({
                       disabled={reject.pending}
                       onClick={() =>
                         reject.run({
-                          address: mandateContracts().vault,
+                          address: vault,
                           abi: mandateVaultAbi,
                           functionName: "reject",
                           args: [request.requestId, reason || "Rejected"],
@@ -249,7 +254,7 @@ function RequestCard({
               variant="ghost"
               onClick={() =>
                 approve.run({
-                  address: mandateContracts().vault,
+                  address: vault,
                   abi: mandateVaultAbi,
                   functionName: "cancel",
                   args: [request.requestId],
@@ -268,7 +273,7 @@ function RequestCard({
   );
 }
 
-function ClosedRow({request, onChanged}: {request: RequestRow; onChanged: () => void}) {
+function ClosedRow({vault, request, onChanged}: {vault: Address; request: RequestRow; onChanged: () => void}) {
   const execute = useOwnerWrite(onChanged);
   const executedNow = request.status === STATUS.executed;
 
@@ -298,7 +303,7 @@ function ClosedRow({request, onChanged}: {request: RequestRow; onChanged: () => 
             disabled={execute.pending}
             onClick={() =>
               execute.run({
-                address: mandateContracts().vault,
+                address: vault,
                 abi: mandateVaultAbi,
                 functionName: "execute",
                 args: [request.requestId],
@@ -322,19 +327,23 @@ function ClosedRow({request, onChanged}: {request: RequestRow; onChanged: () => 
  * within one refresh window; the final chain state always overrides the event narrative.
  */
 function useRequestRows(
+  vault: Address | undefined,
   requested: {requestId: `0x${string}`; txHash: `0x${string}`; blockNumber: bigint}[],
   executed: {requestId: `0x${string}`; txHash: `0x${string}`; blockNumber: bigint}[],
 ): RequestRow[] {
   const [rows, setRows] = useState<RequestRow[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // The vault is part of the signature so switching accounts re-resolves against the new treasury
+  // instead of reusing rows that were read from the previous one.
   const signature = useMemo(
     () =>
       JSON.stringify({
+        vault: vault ?? null,
         requested: requested.map((r) => `${r.requestId}:${r.txHash}`).sort(),
         executed: executed.map((r) => `${r.requestId}:${r.txHash}`).sort(),
       }),
-    [requested, executed],
+    [requested, executed, vault],
   );
 
   useEffect(() => {
@@ -370,7 +379,9 @@ function useRequestRows(
     }
 
     async function resolve() {
-      const {vault} = mandateContracts();
+      // Every getRequest below is scoped to the session's vault, so a request id from another org's
+      // treasury resolves to nothing rather than leaking its state here.
+      if (!vault) return;
       for (const row of byId.values()) {
         if (cancelled) return;
         try {

@@ -6,9 +6,11 @@ import { useEffect } from "react";
 import { usePrivy } from "@privy-io/react-auth";
 import { useActiveAddress } from "@/lib/usePrivyWallet";
 import { RoleProvider, useRole } from "@/lib/useRole";
+import { VaultProvider, useVault } from "@/lib/useVault";
 import { truncateAddress } from "@/lib/format";
 import { OwnerConnectButton } from "@/components/dashboard/OwnerConnectButton";
 import { LoginGate } from "@/components/dashboard/LoginGate";
+import { Onboarding } from "@/components/dashboard/Onboarding";
 import { PageLoader } from "@/components/ui/PageLoader";
 
 const NAV_ITEMS = [
@@ -164,10 +166,14 @@ export default function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
+  // VaultProvider sits outside RoleProvider because role resolution needs the connected address's
+  // vault. Every page below this point assumes that vault exists.
   return (
-    <RoleProvider>
-      <DashboardShell>{children}</DashboardShell>
-    </RoleProvider>
+    <VaultProvider>
+      <RoleProvider>
+        <DashboardShell>{children}</DashboardShell>
+      </RoleProvider>
+    </VaultProvider>
   );
 }
 
@@ -181,6 +187,7 @@ function DashboardShell({
   const { ready, authenticated } = usePrivy();
   const { address, isConnected } = useActiveAddress();
   const { isOwner, loading: roleLoading } = useRole();
+  const { vault, checked: vaultChecked, loading: vaultLoading, error: vaultError } = useVault();
 
   const isUser = authenticated && !roleLoading && !isOwner;
 
@@ -193,6 +200,28 @@ function DashboardShell({
 
   if (ready && !authenticated) {
     return <LoginGate />;
+  }
+
+  // One address owns at most one vault, and every page below assumes there is one. An address with
+  // no vault gets onboarding instead of an empty dashboard full of failed reads - which is the
+  // entire point of moving off a hardcoded vault.
+  if (vaultLoading) {
+    return <PageLoader label="Resolving your vault..." fill />;
+  }
+
+  if (vaultError) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-surface-muted p-6">
+        <div className="max-w-md rounded-xl border border-white/8 bg-surface-card p-6 text-center">
+          <h1 className="text-md font-semibold text-white">Mandate is not reachable</h1>
+          <p className="mt-2 text-[13px] text-white/50">{vaultError}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (vaultChecked && !vault) {
+    return <Onboarding />;
   }
 
   const navItems = isOwner ? NAV_ITEMS : USER_NAV_ITEMS;

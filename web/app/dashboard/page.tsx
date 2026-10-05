@@ -3,7 +3,7 @@
 import {useCallback, useEffect, useMemo, useState} from "react";
 import Link from "next/link";
 import type {Address} from "viem";
-import {TUSDT_ADDRESS, TUSDT_DECIMALS, BOT_RPC_URL, mandateContracts} from "@/lib/bot";
+import {TUSDT_ADDRESS, TUSDT_DECIMALS, BOT_RPC_URL} from "@/lib/bot";
 import {mandateVaultAbi} from "@/lib/abi/mandate";
 import {requestStatusName} from "@/lib/contracts";
 import {publicClient} from "@/lib/chain";
@@ -12,6 +12,7 @@ import {explorerAddress, explorerTx} from "@/lib/chain";
 import {useTreasuryState, useSpendHistory, useAgentBudget} from "@/lib/useChainRead";
 import {useActiveAddress, usePrivyWalletClient} from "@/lib/usePrivyWallet";
 import {useRole} from "@/lib/useRole";
+import {useVault} from "@/lib/useVault";
 import {useOwnerWrite} from "@/lib/useOwnerWrite";
 import {Panel, PanelNote} from "@/components/dashboard/Panel";
 import {DailyCapMeter} from "@/components/dashboard/DailyCapMeter";
@@ -41,17 +42,18 @@ interface PendingRequest {
  * settlement path cannot disagree.
  */
 export default function DashboardPage() {
-  const treasury = useTreasuryState();
-  const history = useSpendHistory({limit: 25});
+  const {vault} = useVault();
+  const treasury = useTreasuryState(vault);
+  const history = useSpendHistory({vault, limit: 25});
   const {address} = useActiveAddress();
   const {isOwner, isApprover} = useRole();
 
   // Per-user state. The treasury tiles below are shared public facts and deliberately identical for
   // everyone, but authority and budget are not: they are resolved against the connected address, so
   // switching wallets must change what this page claims about you.
-  const mine = useAgentBudget(address);
+  const mine = useAgentBudget(vault, address);
 
-  const pending = usePendingRequests();
+  const pending = usePendingRequests(vault);
   const settled = useMemo(
     () => (history.data ?? []).filter((e) => e.kind === "executed").slice(0, 6),
     [history.data],
@@ -229,6 +231,7 @@ export default function DashboardPage() {
               {pending.data.slice(0, 5).map((r) => (
                 <PendingRow
                   key={r.requestId}
+                  vault={vault!}
                   request={r}
                   canAct={isOwner || isApprover}
                   isMe={isSameAddress(r.agent, address)}
@@ -286,11 +289,13 @@ export default function DashboardPage() {
 }
 
 function PendingRow({
+  vault,
   request,
   canAct,
   isMe,
   onSettled,
 }: {
+  vault: Address;
   request: PendingRequest;
   canAct: boolean;
   isMe: boolean;
@@ -329,7 +334,7 @@ function PendingRow({
               disabled={submitting}
               onClick={async () => {
                 const ok = await run({
-                  address: currentVault(),
+                  address: vault,
                   abi: mandateVaultAbi,
                   functionName: "approve",
                   args: [request.requestId],
@@ -374,8 +379,8 @@ function Detail({label, children, href}: {label: string; children: React.ReactNo
  * production volume. For the testnet console this reads the recent window and reconciles each id
  * against `getRequest`, which is exact for that window without inventing state.
  */
-function usePendingRequests(): {data?: PendingRequest[]; loading: boolean; refresh: () => void} {
-  const history = useSpendHistory({limit: 50});
+function usePendingRequests(vault?: Address): {data?: PendingRequest[]; loading: boolean; refresh: () => void} {
+  const history = useSpendHistory({vault, limit: 50});
   const [pending, setPending] = useState<PendingRequest[] | undefined>(undefined);
 
   const requested = useMemo(
@@ -386,10 +391,14 @@ function usePendingRequests(): {data?: PendingRequest[]; loading: boolean; refre
   useEffect(() => {
     let cancelled = false;
     if (history.loading) return;
-    if (requested.length === 0) {
+    // No vault means no history to reconcile. Settle to an empty list rather than leaving the
+    // panel in its skeleton state forever.
+    if (!vault || requested.length === 0) {
       setPending([]);
       return;
     }
+    // Narrowed once, outside the async closure.
+    const treasury: Address = vault;
 
     async function resolve() {
       const resolved: PendingRequest[] = [];
@@ -397,7 +406,7 @@ function usePendingRequests(): {data?: PendingRequest[]; loading: boolean; refre
         if (cancelled) return;
         try {
           const onChain = await publicClient.readContract({
-            address: currentVault(),
+            address: treasury,
             abi: mandateVaultAbi,
             functionName: "getRequest",
             args: [e.requestId],
@@ -426,7 +435,7 @@ function usePendingRequests(): {data?: PendingRequest[]; loading: boolean; refre
     return () => {
       cancelled = true;
     };
-  }, [requested, history.loading]);
+  }, [requested, history.loading, vault]);
 
   const refresh = useCallback(() => {
     setPending(undefined);
@@ -434,8 +443,4 @@ function usePendingRequests(): {data?: PendingRequest[]; loading: boolean; refre
   }, [history]);
 
   return {data: pending, loading: history.loading || pending === undefined, refresh};
-}
-
-function currentVault(): Address {
-  return mandateContracts().vault;
 }
