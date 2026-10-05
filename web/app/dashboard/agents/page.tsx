@@ -5,9 +5,11 @@ import {TUSDT_ADDRESS} from "@/lib/bot";
 import {bytesToHex, isAddress, type Address} from "viem";
 import {mandateVaultAbi} from "@/lib/abi/mandate";
 import {
+  EXPIRY_DAYS_MAX,
   MAX_APPROVAL_THRESHOLD,
   approvalThresholdHint,
   parseApprovalThreshold,
+  parseExpiryDays,
 } from "@/lib/contracts";
 import {
   isSameAddress,
@@ -155,8 +157,8 @@ function AgentEditor({vault, agent, onChanged}: {vault: Address; agent: `0x${str
   const [active, setActive] = useState(false);
   const [policyError, setPolicyError] = useState<string | undefined>();
 
-  const days = Number(expiryDays);
   const thresholdValue = parseApprovalThreshold(threshold);
+  const expiryValue = parseExpiryDays(expiryDays);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -185,6 +187,19 @@ function AgentEditor({vault, agent, onChanged}: {vault: Address; agent: `0x${str
       setDailyCap((policy.dailyCap / 10n ** 6n).toString());
       setThreshold(String(Number(policy.approvalThreshold)));
       setActive(Boolean(policy.active));
+      // Prefill expiry from the chain, as whole days remaining. Leaving the field on its 30-day
+      // default while the policy on-chain has already lapsed showed "30" beside an agent that could
+      // not spend at all, and saving would silently have rewritten it.
+      setExpiryDays(
+        policy.expiry === 0n
+          ? "0"
+          : String(
+              Math.max(
+                0,
+                Math.ceil((Number(policy.expiry) - Math.floor(Date.now() / 1000)) / 86_400),
+              ),
+            ),
+      );
       setError(undefined);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not read the policy.");
@@ -221,10 +236,24 @@ function AgentEditor({vault, agent, onChanged}: {vault: Address; agent: `0x${str
         <Chip tone={state.active ? "mint" : "blush"}>{state.active ? "active" : "inactive"}</Chip>
         {state.tokenAllowed ? <Chip tone="mint">tUSDT allowed</Chip> : <Chip tone="blush">tUSDT denied</Chip>}
         <Chip tone="outline">threshold {state.threshold}</Chip>
+        {expiry.expired ? <Chip tone="blush">policy expired</Chip> : null}
         <Chip tone={expiry.expired ? "blush" : "outline"}>{expiry.label}</Chip>
       </div>
 
       <DailyCapMeter spent={state.spentToday} cap={state.dailyCap} remaining={state.remaining} />
+
+      {/* An expired policy looks identical to a working one until every request reverts. */}
+      {expiry.expired ? (
+        <div className="rounded-lg border border-state-blocked/40 bg-state-blocked-light px-4 py-3">
+          <div className="text-[13px] font-semibold text-state-blocked">
+            This policy expired {formatExpiry(state.expiry).label}.
+          </div>
+          <p className="mt-1 text-[12px] text-text-secondary">
+            Every request from this agent now reverts <span className="font-mono">DeadlinePassed</span>,
+            so it cannot spend at all. Set an expiry above and save to bring it back.
+          </p>
+        </div>
+      ) : null}
 
       <form
         className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"
@@ -233,6 +262,7 @@ function AgentEditor({vault, agent, onChanged}: {vault: Address; agent: `0x${str
           const maxTx = tryParseTusdt(maxPerTx);
           const cap = tryParseTusdt(dailyCap);
           const thresholdValue = parseApprovalThreshold(threshold);
+          const expiryValue = parseExpiryDays(expiryDays);
 
           // Validate everything and say why, instead of returning silently. A form that swallows a
           // bad value looks identical to a form that is merely not submitting.
@@ -245,14 +275,22 @@ function AgentEditor({vault, agent, onChanged}: {vault: Address; agent: `0x${str
                   ? "Max per transaction cannot exceed the daily cap."
                   : thresholdValue === null
                     ? `Approvals needed must be a whole number from 0 to ${MAX_APPROVAL_THRESHOLD}.`
-                    : !(days >= 0)
-                      ? "Expiry cannot be negative."
+                    : expiryValue === null
+                      ? `Expiry must be a whole number of days, 0 for never, up to ${EXPIRY_DAYS_MAX}.`
                       : undefined;
           setPolicyError(problem);
-          if (problem || maxTx === null || cap === null || thresholdValue === null) return;
+          if (
+            problem ||
+            maxTx === null ||
+            cap === null ||
+            thresholdValue === null ||
+            expiryValue === null
+          ) {
+            return;
+          }
 
           const expiryTs =
-            days > 0 ? BigInt(Math.floor(Date.now() / 1000) + days * 86_400) : 0n;
+            expiryValue > 0 ? BigInt(Math.floor(Date.now() / 1000) + expiryValue * 86_400) : 0n;
 
           void savePolicy.run({
             address: vault,
@@ -278,7 +316,7 @@ function AgentEditor({vault, agent, onChanged}: {vault: Address; agent: `0x${str
             inputMode="numeric"
           />
         </Field>
-        <Field label="Expiry (days, 0 = never)">
+        <Field label="Policy expiry" hint={`Whole days, 0 = never, up to ${EXPIRY_DAYS_MAX}.`}>
           <TextInput value={expiryDays} onChange={(e) => setExpiryDays(e.target.value)} inputMode="numeric" />
         </Field>
         <div className="flex items-end justify-between gap-3">
@@ -385,7 +423,7 @@ function RecipientAllowlist({
   const trimmed = target.trim();
   const maxTxBase = maxPerTx.trim() === "" ? 0n : tryParseTusdt(maxPerTx);
   const capBase = dailyCap.trim() === "" ? 0n : tryParseTusdt(dailyCap);
-  const days = Number(expiryDays) || 0;
+  const expiryValue = parseExpiryDays(expiryDays);
 
   const error = !isAddress(trimmed)
     ? "Enter the address the agent may pay."
@@ -395,11 +433,14 @@ function RecipientAllowlist({
         ? "Daily cap must be a valid tUSDT amount."
         : maxTxBase > 0n && capBase > 0n && maxTxBase > capBase
           ? "Max per transaction cannot exceed the daily cap."
-          : days < 0 || !Number.isFinite(days)
-            ? "Expiry cannot be negative."
+          : expiryValue === null
+            ? `Expiry must be a whole number of days, 0 for never, up to ${EXPIRY_DAYS_MAX}.`
             : undefined;
 
-  const expiryTs = days > 0 ? BigInt(Math.floor(Date.now() / 1000) + days * 86_400) : 0n;
+  const expiryTs =
+    expiryValue !== null && expiryValue > 0
+      ? BigInt(Math.floor(Date.now() / 1000) + expiryValue * 86_400)
+      : 0n;
 
   return (
     <div className="mt-5 space-y-4 border-t border-border pt-5">

@@ -111,3 +111,26 @@ export function approvalThresholdHint(value: number | null): string {
     ? "1 = one owner or approver signs before it settles."
     : `${value} = ${value} distinct approvers must sign before it settles.`;
 }
+
+/**
+ * Policy expiry, in whole days. 0 means never.
+ *
+ * Whole days only, deliberately. A fractional value is accepted by the arithmetic and produces a
+ * policy that silently expires minutes later - `0.05` looks like "a bit of a day" and yields a 72
+ * minute leash - after which every request reverts `DeadlinePassed` and the owner's only remedy is
+ * to notice and rewrite the policy. `setAgentPolicy` does not check that the resulting timestamp is
+ * in the future, so nothing upstream catches it either.
+ *
+ * Returns null for anything that is not a non-negative whole number of days.
+ */
+export function parseExpiryDays(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const n = Number(trimmed);
+  if (!Number.isSafeInteger(n) || n < 0) return null;
+  // Anything beyond a year is far more likely a typo than intent, and costs a transaction to undo.
+  if (n > 365) return null;
+  return n;
+}
+
+export const EXPIRY_DAYS_MAX = 365;

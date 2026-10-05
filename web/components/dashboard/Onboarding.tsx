@@ -5,9 +5,11 @@ import {BOT_CHAIN_ID, BOT_EXPLORER_URL, mandateFactory} from "@/lib/bot";
 import {mandateVaultFactoryAbi} from "@/lib/abi/mandate";
 import {tryParseTusdt, truncateAddress} from "@/lib/format";
 import {
+  EXPIRY_DAYS_MAX,
   MAX_APPROVAL_THRESHOLD,
   approvalThresholdHint,
   parseApprovalThreshold,
+  parseExpiryDays,
 } from "@/lib/contracts";
 import {usePrivyWalletClient} from "@/lib/usePrivyWallet";
 import {useOwnerWrite} from "@/lib/useOwnerWrite";
@@ -75,7 +77,7 @@ export function Onboarding() {
   const maxTxBase = tryParseTusdt(maxPerTx);
   const capBase = tryParseTusdt(dailyCap);
   const thresholdValue = parseApprovalThreshold(threshold);
-  const days = Number(expiryDays) || 0;
+  const days = parseExpiryDays(expiryDays);
 
   const leashError =
     maxTxBase === null || maxTxBase <= 0n
@@ -86,11 +88,12 @@ export function Onboarding() {
           ? "Max per transaction cannot exceed the daily cap."
           : thresholdValue === null
             ? `Approvals needed must be a whole number from 0 to ${MAX_APPROVAL_THRESHOLD}.`
-            : days < 0 || !Number.isFinite(days)
-              ? "Expiry cannot be negative."
+            : days === null
+              ? `Expiry must be a whole number of days, 0 for never, up to ${EXPIRY_DAYS_MAX}.`
               : undefined;
 
-  const expiryTimestamp = days > 0 ? BigInt(Math.floor(Date.now() / 1000) + days * 86400) : 0n;
+  const expiryTimestamp =
+    days !== null && days > 0 ? BigInt(Math.floor(Date.now() / 1000) + days * 86400) : 0n;
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-surface-muted p-6">
@@ -144,7 +147,7 @@ export function Onboarding() {
                   inputMode="numeric"
                 />
               </Field>
-              <Field label="Policy expiry (days, 0 = never)">
+              <Field label="Policy expiry" hint={`Whole days, 0 = never, up to ${EXPIRY_DAYS_MAX}.`}>
                 <TextInput
                   value={expiryDays}
                   onChange={(e) => setExpiryDays(e.target.value)}
