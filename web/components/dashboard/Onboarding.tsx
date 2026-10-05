@@ -35,7 +35,9 @@ export function Onboarding() {
 
   const [maxPerTx, setMaxPerTx] = useState("100");
   const [dailyCap, setDailyCap] = useState("1000");
-  const [threshold, setThreshold] = useState("1");
+  // 0 = auto-approve. An autonomous agent is the common case, so it is the default; the caps above
+  // are what actually bound it. Anything requiring a signature is opt-in, and the field says so.
+  const [threshold, setThreshold] = useState("0");
   const [expiryDays, setExpiryDays] = useState("0");
   const [setupError, setSetupError] = useState<string | undefined>();
 
@@ -154,6 +156,21 @@ export function Onboarding() {
             {leashError ? <p className="text-[12px] text-state-blocked">{leashError}</p> : null}
             {setupError ? <p className="text-[12px] text-state-blocked">{setupError}</p> : null}
             {create.error ? <p className="text-[12px] text-state-blocked">{create.error}</p> : null}
+
+            {/* Choosing 0 removes the only human checkpoint, so state the consequence up front. */}
+            {thresholdValue === 0 && !leashError ? (
+              <div className="rounded-lg border border-state-pending/40 bg-state-pending-light px-4 py-3">
+                <div className="text-[13px] font-semibold text-text-primary">
+                  Agents will settle without asking you.
+                </div>
+                <p className="mt-1 text-[12px] text-text-secondary">
+                  With 0 approvals, a request inside these limits is approved on arrival and the executor
+                  can move the money immediately. The per-transaction cap, the daily total, the token and
+                  the recipients are then the only things standing between your treasury and a bad
+                  instruction. Set it to 1 if you want to sign off on each payment.
+                </p>
+              </div>
+            ) : null}
 
             <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
               <p className="text-[11px] text-text-muted">
