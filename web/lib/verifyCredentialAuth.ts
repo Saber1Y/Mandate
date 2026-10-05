@@ -1,9 +1,9 @@
 import {createHash} from "node:crypto";
-import {recoverMessageAddress, verifyMessage} from "viem";
+import {recoverMessageAddress} from "viem";
 import type {Address} from "viem";
-import {mandateContracts} from "./bot";
+import {ZERO_ADDRESS, mandateFactory} from "./bot";
 import {publicClient} from "./chain";
-import {mandateVaultAbi} from "./abi/mandate";
+import {mandateVaultAbi, mandateVaultFactoryAbi} from "./abi/mandate";
 import {credentialAuthorizationMessage, type CredentialAction, type CredentialAuthorization} from "./credentialAuth";
 
 /**
@@ -38,16 +38,17 @@ function isAddress(value: unknown): value is Address {
 /**
  * Verify an owner-signed credential authorization.
  *
- * Checks, in order: shape of every field, signature freshness, signature recovery against the
- * live vault owner, and that the target is actually a registered agent on this vault. The last
- * check matters because a valid owner signature over an unregistered address would otherwise mint
- * a key for an address that cannot spend anything.
+* Checks, in order: shape of every field, signature freshness, recovery of the signer, that the
+ * factory says this signer owns the vault named in the payload, that the vault agrees about its own
+ * owner, and that the target is a registered agent on that vault. The last check matters because a
+ * valid owner signature over an unregistered address would otherwise mint a key for an address that
+ * cannot spend anything.
  */
 export async function verifyCredentialAuthorization(params: {
   authorization: unknown;
   signature: unknown;
   action: CredentialAction;
-}): Promise<{agentId: string; agentAddress: Address; nonceHash: string}> {
+}): Promise<{agentId: string; agentAddress: Address; vault: Address; nonceHash: string}> {
   const auth = params.authorization as Partial<CredentialAuthorization> | null;
   if (!auth || typeof auth !== "object") {
     throw new OwnerAuthorizationError("Missing authorization payload.");
@@ -62,6 +63,9 @@ export async function verifyCredentialAuthorization(params: {
   }
   if (!isAddress(auth.agentAddress)) {
     throw new OwnerAuthorizationError("agentAddress must be a 20-byte hex address.");
+  }
+  if (!isAddress(auth.vault)) {
+    throw new OwnerAuthorizationError("vault must be a 20-byte hex address.");
   }
   if (typeof auth.issuedAt !== "number" || !Number.isFinite(auth.issuedAt)) {
     throw new OwnerAuthorizationError("issuedAt must be a unix timestamp in seconds.");
@@ -81,11 +85,66 @@ export async function verifyCredentialAuthorization(params: {
     throw new OwnerAuthorizationError("Authorization issuedAt is in the future.", 401);
   }
 
-  const {vault} = mandateContracts();
-  let owner: Address;
+  const claimedVault = (auth.vault as string).toLowerCase();
+
+  const message = credentialAuthorizationMessage({
+    action: auth.action,
+    agentId: auth.agentId,
+    agentAddress: auth.agentAddress,
+    vault: claimedVault as Address,
+    issuedAt: auth.issuedAt,
+    nonce: auth.nonce,
+  });
+
+  // Recover first, then ask the factory which vault that signer owns. Deriving authority from the
+  // recovered address rather than from anything in the request is the whole point: there is no
+  // server-side allowlist of operator addresses that could disagree with the chain.
+  const signer = await recoverMessageAddress({message, signature: params.signature as `0x${string}`}).catch(
+    () => null,
+  );
+  if (!signer) {
+    throw new OwnerAuthorizationError("Signature could not be recovered.");
+  }
+
+  let factory: Address;
+  let ownedVault: Address;
   try {
-    owner = (await publicClient.readContract({
-      address: vault,
+    factory = mandateFactory();
+    ownedVault = (await publicClient.readContract({
+      address: factory,
+      abi: mandateVaultFactoryAbi,
+      functionName: "vaultOf",
+      args: [signer],
+    })) as Address;
+  } catch (e) {
+    throw new OwnerAuthorizationError(
+      `Could not read the factory: ${(e as Error).message}`,
+      503,
+    );
+  }
+
+  if (ownedVault.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
+    throw new OwnerAuthorizationError(
+      "That wallet has no vault. Create one before issuing agent keys.",
+      409,
+    );
+  }
+
+  // The signature named a vault; the chain says this signer owns a different one. Refuse rather
+  // than silently acting on whichever vault the payload happened to carry.
+  if (ownedVault.toLowerCase() !== claimedVault) {
+    throw new OwnerAuthorizationError(
+      `This signature names vault ${claimedVault} but the signer owns ${ownedVault}.`,
+      403,
+    );
+  }
+
+  // Confirm the factory's mapping agrees with the vault's own owner(). This is a cheap belt-and-
+  // braces read: it means authority can only ever come from the vault itself.
+  let vaultOwner: Address;
+  try {
+    vaultOwner = (await publicClient.readContract({
+      address: ownedVault,
       abi: mandateVaultAbi,
       functionName: "owner",
     })) as Address;
@@ -95,27 +154,7 @@ export async function verifyCredentialAuthorization(params: {
       503,
     );
   }
-
-  const message = credentialAuthorizationMessage({
-    action: auth.action,
-    agentId: auth.agentId,
-    agentAddress: auth.agentAddress,
-    issuedAt: auth.issuedAt,
-    nonce: auth.nonce,
-  });
-
-  const recovered = await recoverMessageAddress({message, signature: params.signature as `0x${string}`}).catch(
-    () => null,
-  );
-  if (!recovered) {
-    throw new OwnerAuthorizationError("Signature could not be recovered.");
-  }
-  const valid = await verifyMessage({
-    address: owner,
-    message,
-    signature: params.signature as `0x${string}`,
-  }).catch(() => false);
-  if (!valid || recovered.toLowerCase() !== owner.toLowerCase()) {
+  if (vaultOwner.toLowerCase() !== signer.toLowerCase()) {
     throw new OwnerAuthorizationError("Signature does not match the vault owner on this chain.");
   }
 
@@ -123,7 +162,7 @@ export async function verifyCredentialAuthorization(params: {
   try {
     registered = Boolean(
       await publicClient.readContract({
-        address: vault,
+        address: ownedVault,
         abi: mandateVaultAbi,
         functionName: "agents",
         args: [auth.agentAddress],
@@ -145,7 +184,10 @@ export async function verifyCredentialAuthorization(params: {
   return {
     agentId: auth.agentId,
     agentAddress: auth.agentAddress,
+    vault: ownedVault,
     // Hashed so the stored replay guard holds no replayable authorization material.
-    nonceHash: createHash("sha256").update(`${auth.nonce}:${auth.action}:${auth.agentId}`).digest("hex"),
+    nonceHash: createHash("sha256")
+      .update(`${auth.nonce}:${auth.action}:${auth.agentId}:${ownedVault.toLowerCase()}`)
+      .digest("hex"),
   };
 }

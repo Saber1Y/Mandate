@@ -1,5 +1,5 @@
 import type {Address} from "viem";
-import {botChain, mandateContracts} from "./bot";
+import {botChain} from "./bot";
 
 /**
  * Credential authorization payload - the contract between the wallet and the API.
@@ -19,6 +19,15 @@ export interface CredentialAuthorization {
   action: CredentialAction;
   agentId: string;
   agentAddress: Address;
+  /**
+   * The vault the signer is authorizing against.
+   *
+   * This is part of the SIGNED payload, not derived by the server. The server recovers the signer,
+   * looks up `vaultOf(signer)` on the factory, and requires that it equals this value - so a
+   * signature can only ever act on the treasury the signer actually owns, even though the signer
+   * chose which vault to name.
+   */
+  vault: Address;
   issuedAt: number;
   nonce: string;
 }
@@ -27,17 +36,14 @@ export interface CredentialAuthorization {
  * Canonical payload. Field order and separators are fixed because the client signs these exact
  * bytes and the server re-derives them; any change here invalidates outstanding signatures.
  */
-export function credentialAuthorizationMessage(
-  auth: CredentialAuthorization,
-): string {
-  const {vault} = mandateContracts();
+export function credentialAuthorizationMessage(auth: CredentialAuthorization): string {
   return [
     "Mandate credential authorization",
     `action: ${auth.action}`,
     `agentId: ${auth.agentId}`,
     `agent: ${auth.agentAddress}`,
     `chain: ${botChain.id}`,
-    `vault: ${vault.toLowerCase()}`,
+    `vault: ${auth.vault.toLowerCase()}`,
     `issuedAt: ${auth.issuedAt}`,
     `nonce: ${auth.nonce}`,
   ].join("\n");

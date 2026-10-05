@@ -22,6 +22,14 @@ export interface AgentCredential {
   agentId: string;
   /** On-chain address this key may act as. Must be a registered agent on the vault. */
   agentAddress: Address;
+  /**
+   * The vault this key is scoped to, resolved from the signing owner's `vaultOf` at issue time.
+   *
+   * This is what makes the credential single-tenant. Without it the API would have to guess which
+   * vault the caller means, and a key issued by org A could be replayed against org B's vault if the
+   * same agent address happened to be registered on both.
+   */
+  vault: Address;
   /** SHA-256 of the key, hex. The only thing persisted. */
   keyHash: string;
   /** Last few characters, so an operator can identify a key without storing it. */
