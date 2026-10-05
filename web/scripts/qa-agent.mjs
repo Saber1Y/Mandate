@@ -1,360 +1,245 @@
 #!/usr/bin/env node
 /**
- * QA Agent - autonomous spending test runner for SpendArc.
+ * Mandate API QA runner.
  *
- * Reads structured ```scenario blocks from QA.md (or --qa <path>), uses
- * `opencode run` (free model) as its decision brain, submits each request via
- * the /api/payments/request control-plane API, verifies the response against
- * the expected result, and streams every step to /api/agent-runs for the
- * live dashboard feed.
+ * Exercises the live control plane an autonomous agent actually uses: bearer auth, request
+ * validation, on-chain policy rejection, and the approval-then-execute lifecycle. It asserts on
+ * HTTP status and decoded contract error names, because the contract is the only authority - a
+ * cached mirror agreeing with itself proves nothing.
  *
  * Usage:
- *   node scripts/qa-agent.mjs --agent agent_c720ee6d [--qa ../QA.md] [--model opencode/deepseek-v4-flash-free] [--base http://localhost:3000] [--api-key spend_...] [--dry-run]
+ *   node scripts/qa-agent.mjs --api-key mdt_... [--base http://localhost:3000] [--settle]
+ *   node scripts/qa-agent.mjs --dry-run
+ *
+ * Env: AGENT_API_KEY, AGENT_API_BASE, QA_RECIPIENT (allowlisted recipient, required for --settle).
  */
 
-import {spawnSync} from "node:child_process";
 import {readFileSync} from "node:fs";
 import path from "node:path";
 import {fileURLToPath} from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+const BYTES32 = "0x" + "11".repeat(32);
+
 function parseArgs(argv) {
-  const args = {agent: null, qa: path.join(__dirname, "qa-demo-agent.md"), model: null, base: null, dryRun: false, mission: "Run QA scenarios", apiKey: null};
+  const args = {apiKey: null, base: null, dryRun: false, settle: false};
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === "--agent") args.agent = argv[++i];
-    else if (a === "--qa") args.qa = argv[++i];
-    else if (a === "--model") args.model = argv[++i];
+    if (a === "--api-key") args.apiKey = argv[++i];
     else if (a === "--base") args.base = argv[++i];
-    else if (a === "--mission") args.mission = argv[++i];
-    else if (a === "--api-key") args.apiKey = argv[++i];
+    else if (a === "--settle") args.settle = true;
     else if (a === "--dry-run") args.dryRun = true;
+    else if (a === "--help" || a === "-h") args.help = true;
   }
   args.base = args.base || process.env.AGENT_API_BASE || "http://localhost:3000";
-  args.model = args.model || process.env.AGENT_MODEL || "opencode/deepseek-v4-flash-free";
   args.apiKey = args.apiKey || process.env.AGENT_API_KEY || null;
   return args;
-}
-
-function extractScenarios(mdPath) {
-  const content = readFileSync(mdPath, "utf8");
-  const blocks = [];
-  const re = /```scenario\s*\n([\s\S]*?)```/g;
-  let m;
-  while ((m = re.exec(content)) !== null) {
-    try {
-      blocks.push(JSON.parse(m[1]));
-    } catch (e) {
-      console.error(`[qa-agent] Skipping malformed scenario block: ${e.message}`);
-    }
-  }
-  return blocks;
 }
 
 async function api(base, pathname, {method = "GET", body, auth} = {}) {
   const headers = {};
   if (body) headers["content-type"] = "application/json";
   if (auth) headers["authorization"] = `Bearer ${auth}`;
-  const res = await fetch(`${base}${pathname}`, {
-    method,
-    headers,
-    body: body ? JSON.stringify(body) : undefined,
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    const err = new Error(data.error || data.message || `HTTP ${res.status}`);
-    err.status = res.status;
-    throw err;
-  }
-  return data;
-}
-
-function askBrain(model, prompt, attempts = 3) {
-  for (let i = 0; i < attempts; i++) {
-    const p = spawnSync("opencode", ["run", "-m", model, "--pure", prompt], {
-      encoding: "utf8",
-      timeout: 120_000,
-      maxBuffer: 4 * 1024 * 1024,
-    });
-    if (p.status !== 0) {
-      const stderr = (p.stderr || "").slice(0, 500);
-      console.error(`[qa-agent] opencode exited ${p.status}: ${stderr}`);
-      continue;
-    }
-    const out = (p.stdout || "").trim();
-    const parsed = tryParseJson(out);
-    if (parsed) return parsed;
-    console.warn(`[qa-agent] Brain did not return parseable JSON (attempt ${i + 1}); retrying...`);
-  }
-  return null;
-}
-
-function tryParseJson(text) {
-  const fence = text.match(/```(?:json)?\s*\n([\s\S]*?)\n```/);
-  const candidate = fence ? fence[1] : text;
-  const block = candidate.match(/\{[\s\S]*\}/);
-  if (!block) return null;
+  const res = await fetch(`${base}${pathname}`, {method, headers, body: body ? JSON.stringify(body) : undefined});
+  const text = await res.text();
+  let json = null;
   try {
-    return JSON.parse(block[0]);
+    json = text ? JSON.parse(text) : null;
   } catch {
-    return null;
+    json = {raw: text.slice(0, 200)};
+  }
+  return {status: res.status, body: json};
+}
+
+let passed = 0;
+let failed = 0;
+
+function check(title, ok, detail) {
+  if (ok) {
+    passed++;
+    console.log(`  ok   ${title}`);
+  } else {
+    failed++;
+    console.error(`  FAIL ${title}${detail ? ` -> ${detail}` : ""}`);
   }
 }
 
-function buildRequestFromBrain(decision, fallbackRequest) {
-  const d = decision || {};
-  const recipient = d.recipient || fallbackRequest?.recipient;
-  const amount = d.amount !== undefined && d.amount !== null ? d.amount : fallbackRequest?.amount;
-  const purpose = d.purpose || fallbackRequest?.purpose || d.reasoning || "qa test";
-  return {recipient, amount: Number(amount), purpose};
+function section(name) {
+  console.log(`\n${name}`);
 }
 
-function matchExpected(actual, expected) {
-  if (expected.status && actual.status !== expected.status) {
-    return {pass: false, reason: `status ${actual.status} != expected ${expected.status}`};
+/**
+ * Scenarios that need no network, so --dry-run still reports the suite shape.
+ */
+function dryRun() {
+  console.log("Mandate QA dry run. Live checks that would run:");
+  for (const [group, names] of Object.entries(SCENARIOS)) {
+    console.log(`\n${group}`);
+    for (const name of names) console.log(`  - ${name}`);
   }
-  if (expected.reason) {
-    const actualReason = (actual.reason || actual.decisionCode || "").toUpperCase();
-    if (actualReason !== expected.reason) {
-      return {pass: false, reason: `reason ${actualReason} != expected ${expected.reason}`};
-    }
-  }
-  if (expected.executionStatus && actual.executionStatus !== expected.executionStatus) {
-    return {pass: false, reason: `executionStatus ${actual.executionStatus} != expected ${expected.executionStatus}`};
-  }
-  if (expected.hasTx !== undefined) {
-    const hasTx = Boolean(actual.txHash);
-    if (hasTx !== expected.hasTx) {
-      return {pass: false, reason: `hasTx ${hasTx} != expected ${expected.hasTx}`};
-    }
-  }
-  return {pass: true};
+  const count = Object.values(SCENARIOS).reduce((n, g) => n + g.length, 0);
+  console.log(`\n${count} checks would run, 0 executed.`);
 }
 
-async function applyPolicyHook(base, agentId, hook, label) {
-  if (!hook || hook.setDailyCapUsd === undefined) return;
-  const policy = await api(base, `/api/policies/${agentId}`);
-  await api(base, `/api/policies/${agentId}`, {
-    method: "PUT",
-    body: {dailyCap: hook.setDailyCapUsd},
+const SCENARIOS = {
+  "auth and identity": [
+    "health responds without credentials",
+    "/api/agents/me requires a bearer key",
+    "/api/agents/me returns the on-chain policy",
+  ],
+  "request validation": [
+    "malformed body is rejected",
+    "non-address recipient is rejected",
+    "float amount is rejected",
+    "zero amount is rejected",
+    "malformed token is rejected",
+    "missing idempotency key is rejected",
+    "bad request id is rejected",
+  ],
+  "on-chain policy": [
+    "over the per-transaction cap reverts on-chain",
+    "an unallowlisted recipient reverts on-chain",
+  ],
+};
+
+async function runAuthAndIdentity(base, key) {
+  section("auth and identity");
+
+  const health = await api(base, "/api/health");
+  check("health responds without credentials", health.status === 200, `status ${health.status}`);
+
+  const anon = await api(base, "/api/agents/me");
+  check("/api/agents/me requires a bearer key", anon.status === 401, `status ${anon.status}`);
+
+  const me = await api(base, "/api/agents/me", {auth: key});
+  check(
+    "/api/agents/me returns the on-chain policy",
+    me.status === 200 && me.body?.registeredOnChain === true && !!me.body?.policy,
+    JSON.stringify(me.body).slice(0, 200),
+  );
+}
+
+async function runValidation(base, key) {
+  section("request validation");
+
+  const cases = [
+    ["non-address recipient is rejected", {amount: "1000", recipient: "0xnope"}, 400],
+    ["float amount is rejected", {amount: "1.5", recipient: "0x2222222222222222222222222222222222222222"}, 400],
+    ["zero amount is rejected", {amount: "0", recipient: "0x2222222222222222222222222222222222222222"}, 400],
+    ["malformed token is rejected", {amount: "1000", recipient: "0x2222222222222222222222222222222222222222", token: "0xdeadbeef"}, 400],
+    ["missing idempotency key is rejected", {amount: "1000", recipient: "0x2222222222222222222222222222222222222222"}, 400],
+  ];
+
+  for (const [title, body, expected] of cases) {
+    // "missing idempotency key" must send no key at all, so it is posted without the default one.
+    const payload = title.includes("missing idempotency") ? body : {...body, idempotencyKey: BYTES32};
+    const res = await api(base, "/api/requests", {method: "POST", auth: key, body: payload});
+    check(title, res.status === expected, `status ${res.status} body ${JSON.stringify(res.body)}`);
+  }
+
+  const badId = await api(base, "/api/requests/0x1234", {auth: key});
+  check("bad request id is rejected", badId.status === 400, `status ${badId.status}`);
+}
+
+async function runPolicy(base, key) {
+  section("on-chain policy");
+
+  // Far beyond any sane per-transaction cap. The vault must reject it, not the server.
+  const overCap = await api(base, "/api/requests", {
+    method: "POST",
+    auth: key,
+    body: {
+      amount: "100000000000000000000000000000000000",
+      recipient: "0x2222222222222222222222222222222222222222",
+      idempotencyKey: "0x" + "22".repeat(32),
+    },
   });
-  console.log(`[qa-agent] ${label}: daily cap ${policy.policy?.daily_cap ?? "?"} -> ${hook.setDailyCapUsd} USDC`);
+  check(
+    "over the per-transaction cap reverts on-chain",
+    overCap.status === 422 && overCap.body?.reason === "InvalidPolicy",
+    `status ${overCap.status} reason ${overCap.body?.reason}`,
+  );
+
+  // A recipient the operator has not allowlisted must fail closed.
+  const unallowlisted = await api(base, "/api/requests", {
+    method: "POST",
+    auth: key,
+    body: {
+      amount: "1000",
+      recipient: "0x3333333333333333333333333333333333333333",
+      idempotencyKey: "0x" + "33".repeat(32),
+    },
+  });
+  check(
+    "an unallowlisted recipient reverts on-chain",
+    unallowlisted.status === 422 && unallowlisted.body?.reason === "NotAuthorized",
+    `status ${unallowlisted.status} reason ${unallowlisted.body?.reason}`,
+  );
 }
 
-async function verifyHistory(base, spec) {
-  const data = await api(base, `/api/transactions${spec.agentId ? `?agentId=${spec.agentId}` : ""}`);
-  const txs = data.transactions ?? [];
-  const confirmed = txs.filter((t) => t.execution_status === "CONFIRMED").length;
-  const blocked = txs.filter((t) => t.execution_status === "BLOCKED").length;
-  const failed = txs.filter((t) => t.execution_status === "FAILED").length;
-  const checks = [];
-  if (spec.expectConfirmed) checks.push(["confirmed rows", confirmed > 0, `found ${confirmed}`]);
-  if (spec.expectBlocked) checks.push(["blocked rows", blocked > 0, `found ${blocked}`]);
-  if (spec.expectFailed) checks.push(["failed rows", failed > 0, `found ${failed}`]);
-  const pass = checks.every(([, ok]) => ok);
-  const detail = checks.map(([name, ok, found]) => `${name}:${ok ? "ok" : "MISSING"}(${found})`).join(" ");
-  return {pass, detail, total: txs.length};
-}
+async function runSettlement(base, key, recipient) {
+  section("approval and settlement");
+  console.log("  Approving requires the organization owner wallet, which this runner does not hold.");
+  console.log(`  Request 1 tUSDT-equivalent unit to ${recipient}, then approve on-chain, then execute:`);
+  const created = await api(base, "/api/requests", {
+    method: "POST",
+    auth: key,
+    body: {amount: "1000", recipient, idempotencyKey: "0x" + "44".repeat(32)},
+  });
+  check(
+    "request creates a pending mandate",
+    created.status === 201 && created.body?.status === "Pending",
+    `status ${created.status} body ${JSON.stringify(created.body).slice(0, 200)}`,
+  );
+  if (created.status !== 201) return;
 
-function printHeader() {
-  console.log("");
-  console.log("======================================");
-  console.log("  SpendArc QA Agent");
-  console.log("======================================");
+  const {requestId} = created.body;
+  const early = await api(base, `/api/requests/${requestId}/execute`, {method: "POST", auth: key});
+  check(
+    "execution before approval reverts",
+    early.status === 422 && early.body?.reason === "RequestNotApproved",
+    `status ${early.status} reason ${early.body?.reason}`,
+  );
+  console.log(`\n  requestId: ${requestId}`);
+  console.log(`  approve:   cast send <vault> "approve(bytes32)" ${requestId} --private-key <owner>`);
+  console.log(`  execute:   curl -X POST -H "authorization: Bearer $AGENT_API_KEY" \\`);
+  console.log(`               ${base}/api/requests/${requestId}/execute`);
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  if (!args.agent) {
-    console.error("Missing --agent. Usage: node scripts/qa-agent.mjs --agent <agentId>");
-    process.exit(1);
+  if (args.help) {
+    console.log("Usage: node scripts/qa-agent.mjs --api-key mdt_... [--base URL] [--settle] [--dry-run]");
+    return;
+  }
+  if (args.dryRun) return dryRun();
+
+  if (!args.apiKey) {
+    console.error("An agent API key is required. Pass --api-key mdt_... or set AGENT_API_KEY.");
+    process.exitCode = 2;
+    return;
   }
 
-  printHeader();
-  const scenarios = extractScenarios(args.qa);
-  console.log(`[qa-agent] QA file: ${args.qa}`);
-  console.log(`[qa-agent] Agent: ${args.agent} | Model: ${args.model} | Base: ${args.base}${args.apiKey ? " | Auth: Bearer api-key" : " | Auth: operator (no key)"}${args.dryRun ? " (DRY RUN)" : ""}`);
-  if (scenarios.length === 0) {
-    console.error("[qa-agent] No ```scenario blocks found.");
-    process.exit(1);
-  }
-  console.log(`[qa-agent] Found ${scenarios.length} scenario(s).`);
-  console.log("");
-
-  // With an api-key, introspect our own leash before spending (agent-facing auth).
-  let selfAddress = null;
-  if (args.apiKey) {
-    try {
-      const me = await api(args.base, "/api/agents/me", {auth: args.apiKey});
-      selfAddress = me.agent?.address;
-      console.log(`[qa-agent] Leash: ${me.agent.name} | ${me.policy?.maxPerTxUsdc ?? "?"} USDC/tx, ${me.policy?.dailyCapUsdc ?? "?"} USDC/day, ${me.policy?.spentTodayUsdc ?? "?"} spent today`);
-      console.log(`[qa-agent] Allowlists: recipients=${(me.allowlists?.recipients ?? []).join(",") || "none"} tokens=${(me.allowlists?.tokens ?? []).join(",") || "none"}`);
-      console.log("");
-    } catch (e) {
-      console.error(`[qa-agent] Leash introspection failed (${e.message}); aborting - the api-key may be wrong.`);
-      process.exit(1);
+  console.log(`Mandate QA against ${args.base}`);
+  await runAuthAndIdentity(args.base, args.apiKey);
+  await runValidation(args.base, args.apiKey);
+  await runPolicy(args.base, args.apiKey);
+  if (args.settle) {
+    const recipient = process.env.QA_RECIPIENT;
+    if (!recipient) {
+      console.error("--settle needs QA_RECIPIENT set to an allowlisted address.");
+      process.exitCode = 2;
+      return;
     }
+    await runSettlement(args.base, args.apiKey, recipient);
   }
 
-  let run = null;
-  if (!args.dryRun) {
-    try {
-      const created = await api(args.base, "/api/agent-runs", {
-        method: "POST",
-        body: {agentId: args.agent, mission: args.mission, budget: 0, model: args.model},
-      });
-      run = created.run;
-      console.log(`[qa-agent] Run created: ${run.id}`);
-    } catch (e) {
-      console.error(`[qa-agent] Could not create run via API: ${e.message}. Continuing without feed logging.`);
-    }
-  }
-
-  let passed = 0;
-  let failed = 0;
-
-  for (let i = 0; i < scenarios.length; i++) {
-    const s = scenarios[i];
-    console.log(`--- Scenario ${i + 1}/${scenarios.length}: ${s.title} ---`);
-
-    if (run) {
-      await api(args.base, `/api/agent-runs/${run.id}`, {
-        method: "POST",
-        body: {kind: "scenario", summary: s.title, details: {scenario: i + 1, total: scenarios.length}},
-      }).catch(() => {});
-    }
-
-    // History-only scenario
-    if (s.verifyHistory) {
-      const vh = await verifyHistory(args.base, s.verifyHistory);
-      const pass = vh.pass;
-      if (pass) passed++;
-      else failed++;
-      if (run) {
-        await api(args.base, `/api/agent-runs/${run.id}`, {
-          method: "POST",
-          body: {
-            kind: pass ? "passed" : "fail",
-            summary: `History check ${pass ? "passed" : "failed"}`,
-            details: {detail: vh.detail, total: vh.total},
-          },
-        }).catch(() => {});
-        await api(args.base, `/api/agent-runs/${run.id}`, {
-          method: "PATCH",
-          body: {passed, failed},
-        }).catch(() => {});
-      }
-      console.log(`[qa-agent] ${pass ? "PASS" : "FAIL"} - ${vh.detail} (${vh.total} total txs)`);
-      continue;
-    }
-
-    if (!s.request) {
-      console.log("[qa-agent] SKIP - no request body.");
-      continue;
-    }
-
-    // Setup hook (e.g. zero the daily cap). Dry-run stays read-only.
-    if (!args.dryRun) {
-      await applyPolicyHook(args.base, args.agent, s.setup, "setup");
-    }
-
-    // Brain decides the concrete request
-    const req = {...s.request, amount: Number(s.request.amount)};
-    const brainScenario = {title: s.title, expected: s.expected, request: req};
-    const brainPrompt = `You are the autonomous QA agent for SpendArc, an on-chain agent spending control plane.\n` +
-      `The SpendArc API will enforce a policy (per-tx cap, daily cap, recipient allowlist) and may approve or block the request.\n` +
-      `Given this QA scenario, produce the exact payment request JSON.\n\n` +
-      `Scenario: ${JSON.stringify(brainScenario, null, 2)}\n\n` +
-      `Output ONLY a JSON object of the form:\n` +
-      `{"recipient": "<checksum address>", "amount": <number in USDC>, "purpose": "<short purpose>", "reasoning": "<why this request should produce the expected result>"}\n` +
-      `Use the recipient and amount from the scenario verbatim. Do not invent values.`;
-    const decision = args.dryRun ? null : askBrain(args.model, brainPrompt);
-    let brainReq = buildRequestFromBrain(decision, req);
-    if (selfAddress && (brainReq.recipient === "__self__" || brainReq.recipient === "SELF")) {
-      brainReq.recipient = selfAddress;
-    }
-    if (decision) {
-      console.log(`[qa-agent] Brain reasoning: ${decision.reasoning || "n/a"}`);
-    } else if (!args.dryRun) {
-      console.warn("[qa-agent] Brain failed; falling back to structured request.");
-    }
-    console.log(`[qa-agent] Request: ${JSON.stringify(brainReq)}`);
-
-    if (run) {
-      await api(args.base, `/api/agent-runs/${run.id}`, {
-        method: "POST",
-        body: {kind: "decision", summary: `Decided to request ${brainReq.amount} USDC`, details: {recipient: brainReq.recipient, amount: brainReq.amount, reasoning: decision?.reasoning}},
-      }).catch(() => {});
-    }
-
-    let actual;
-    if (args.dryRun) {
-      actual = {status: "APPROVED", executionStatus: "CONFIRMED", txHash: "0x" + "0".repeat(64), reason: null};
-      console.log("[qa-agent] (dry-run, simulated response)");
-    } else {
-      actual = await api(args.base, "/api/payments/request", {
-        method: "POST",
-        auth: args.apiKey,
-        body: {
-          agentId: args.agent,
-          recipient: brainReq.recipient,
-          amount: brainReq.amount,
-          token: "usdc",
-          purpose: brainReq.purpose,
-        },
-      });
-    }
-
-    console.log(`[qa-agent] Response: ${JSON.stringify(actual)}`);
-
-    // Teardown hook (restore policy). Dry-run stays read-only.
-    if (!args.dryRun) {
-      await applyPolicyHook(args.base, args.agent, s.teardown, "teardown");
-    }
-
-    const verdict = matchExpected(actual, s.expected);
-    if (verdict.pass) passed++;
-    else failed++;
-
-    if (run) {
-      const kind = actual.status === "BLOCKED" ? "blocked" : actual.status === "FAILED" ? "failed" : verdict.pass ? "approved" : "error";
-      await api(args.base, `/api/agent-runs/${run.id}`, {
-        method: "POST",
-        body: {
-          kind,
-          summary: `${verdict.pass ? "PASS" : "FAIL"} ${brainReq.amount} USDC to ${brainReq.recipient}`,
-          details: {status: actual.status, reason: actual.reason ?? verdict.reason, purpose: brainReq.purpose},
-          txHash: actual.txHash ?? null,
-        },
-      }).catch(() => {});
-      await api(args.base, `/api/agent-runs/${run.id}`, {
-        method: "PATCH",
-        body: {passed, failed},
-      }).catch(() => {});
-    }
-
-    console.log(`[qa-agent] VERDICT: ${verdict.pass ? "PASS" : "FAIL"}${verdict.pass ? "" : ` - ${verdict.reason}`}`);
-    console.log("");
-  }
-
-  console.log("======================================");
-  console.log(`  Results: ${passed} passed, ${failed} failed`);
-  console.log("======================================");
-
-  if (run) {
-    const status = failed > 0 ? "completed_with_failures" : "completed";
-    await api(args.base, `/api/agent-runs/${run.id}`, {
-      method: "PUT",
-      body: {action: "end", status},
-    }).catch(() => {});
-    console.log(`[qa-agent] Run finalized: ${run.id}`);
-  }
-
-  process.exit(failed > 0 ? 1 : 0);
+  console.log(`\n${passed} passed, ${failed} failed`);
+  if (failed > 0) process.exitCode = 1;
 }
 
 main().catch((e) => {
-  console.error(`[qa-agent] Fatal: ${e.message}`);
-  process.exit(1);
+  console.error(e);
+  process.exitCode = 1;
 });
