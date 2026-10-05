@@ -8,8 +8,8 @@ const steps = [
   },
   {
     n: "02",
-    title: "Fund it with USDC",
-    body: "Grab testnet gas and USDC from the faucet, then deposit into the vault. Your agent can only ever spend what is sitting in the vault - it never holds a balance itself.",
+    title: "Fund it with tUSDT",
+    body: "Grab testnet gas and tUSDT from the faucet, then deposit into the vault. Your agent can only ever spend what is sitting in the vault - it never holds a balance itself.",
   },
   {
     n: "03",

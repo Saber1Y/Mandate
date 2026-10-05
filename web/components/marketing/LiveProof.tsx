@@ -3,33 +3,68 @@
 import {useEffect, useState} from "react";
 import {Eyebrow} from "./Section";
 import {Card} from "@/components/ui/Card";
-import {StateBadge} from "@/components/ui/StateBadge";
 import {TxChip, Chip} from "@/components/ui/Chip";
 import {Skeleton} from "@/components/ui/Row";
-import {fetchLatestProofs, type ProofResult} from "@/lib/proof";
-import {formatUsdc, truncateHash} from "@/lib/format";
+import {truncateAddress, truncateHash, formatTusdt, timeAgo} from "@/lib/format";
 import {explorerTx} from "@/lib/chain";
+import {useSpendHistory} from "@/lib/useChainRead";
+import type {SpendEvent} from "@/lib/reads";
 
-function ProofColumn({data}: {data: ProofResult | undefined}) {
-  const approved = data?.kind === "approved";
+/**
+ * Live activity, read from MandateVault events.
+ *
+ * This replaced a proof endpoint that returned recorded rows and a snapshot fixture, so both
+ * columns below are now genuine chain reads. The distinction the old UI drew between "live" and
+ * "recorded" no longer exists because there is only one source.
+ */
+
+const KIND_LABEL: Record<SpendEvent["kind"], string> = {
+  requested: "SpendRequested",
+  approved: "RequestApproved",
+  executed: "RequestExecuted",
+  rejected: "RequestRejected",
+  expired: "RequestExpired",
+  cancelled: "RequestCancelled",
+  settled: "ReceiptIssued",
+};
+
+function EventColumn({
+  title,
+  subtitle,
+  events,
+  loading,
+  match,
+}: {
+  title: string;
+  subtitle: string;
+  events: SpendEvent[];
+  loading: boolean;
+  match: (e: SpendEvent) => boolean;
+}) {
+  const chosen = events.filter(match).slice(0, 1);
+
   return (
     <Card tone="paper" pad="lg" className="flex h-full flex-col gap-6">
       <div className="flex items-center justify-between">
-        {data ? <StateBadge kind={data.kind} /> : <Skeleton className="h-6 w-24" />}
-        {data ? (
-          <Chip tone={data.source === "chain" ? "accent" : "outline"}>
-            {data.source === "chain" ? "live read" : data.source === "db" ? "recorded" : "snapshot"}
-          </Chip>
-        ) : (
+        <span className="text-[13px] font-semibold text-text-primary">{title}</span>
+        {loading ? (
           <Skeleton className="h-6 w-16" />
+        ) : (
+          <Chip tone="accent">live read</Chip>
         )}
       </div>
 
       <div>
-        <span className="text-[11px] font-medium uppercase tracking-wider text-text-muted">executeSpend</span>
-        {data ? (
-          <div className="mt-1 text-heading-lg leading-none text-text-primary" style={{fontWeight: 600}}>
-            {formatUsdc(data.amount)} <span className="text-heading-sm text-text-muted">USDC</span>
+        <span className="text-[11px] font-medium uppercase tracking-wider text-text-muted">
+          amount
+        </span>
+        {chosen.length > 0 ? (
+          <div
+            className="mt-1 text-heading-lg leading-none text-text-primary"
+            style={{fontWeight: 600}}
+          >
+            {formatTusdt(chosen[0].amount)}{" "}
+            <span className="text-heading-sm text-text-muted">tUSDT</span>
           </div>
         ) : (
           <Skeleton className="mt-2 h-12 w-40" />
@@ -37,74 +72,84 @@ function ProofColumn({data}: {data: ProofResult | undefined}) {
       </div>
 
       <div className="space-y-3 border-t border-border pt-5 text-[13px]">
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-text-muted">Event</span>
-          {data ? (
-            <span className="text-right text-text-primary">
-              {approved ? "AgentActionApproved" : "AgentActionBlocked"}
-              {!approved && data.reason ? <span className="text-text-muted"> - &ldquo;{data.reason}&rdquo;</span> : null}
-            </span>
+        <Line label="Event">
+          {chosen.length > 0 ? (
+            <span className="text-text-primary">{KIND_LABEL[chosen[0].kind]}</span>
           ) : (
             <Skeleton className="h-4 w-40" />
           )}
-        </div>
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-text-muted">Result</span>
+        </Line>
+        <Line label="Recipient">
+          {chosen.length > 0 ? (
+            <span className="font-mono text-text-primary">
+              {truncateAddress(chosen[0].target)}
+            </span>
+          ) : (
+            <Skeleton className="h-4 w-32" />
+          )}
+        </Line>
+        <Line label="Result">
           <span className="text-text-primary">
-            {approved ? `vendor received ${data ? formatUsdc(data.amount) : "-"} USDC` : "nothing moved"}
+            {chosen.length > 0 ? "settled from vault-held balance" : "nothing has happened yet"}
           </span>
-        </div>
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-text-muted">Transaction</span>
-          {data ? (
-            data.txHash ? (
-              <TxChip href={explorerTx(data.txHash)} label={truncateHash(data.txHash)} />
-            ) : (
-              <span className="text-right text-text-muted">blocked - no tx</span>
-            )
+        </Line>
+        <Line label="Transaction">
+          {chosen.length > 0 ? (
+            <TxChip href={explorerTx(chosen[0].txHash)} label={truncateHash(chosen[0].txHash)} />
           ) : (
             <Skeleton className="h-6 w-32" />
           )}
-        </div>
+        </Line>
       </div>
     </Card>
   );
 }
 
-export function LiveProof() {
-  const [approved, setApproved] = useState<ProofResult>();
-  const [blocked, setBlocked] = useState<ProofResult>();
+function Line({label, children}: {label: string; children: React.ReactNode}) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-text-muted">{label}</span>
+      {children}
+    </div>
+  );
+}
 
-  useEffect(() => {
-    let alive = true;
-    fetchLatestProofs().then((r) => {
-      if (!alive) return;
-      setApproved(r.approved);
-      setBlocked(r.blocked);
-    });
-    return () => {
-      alive = false;
-    };
-  }, []);
+export function LiveProof() {
+  const {data, loading} = useSpendHistory({limit: 50});
+
+  const events = data ?? [];
+  const latestExecuted = events.find((e) => e.kind === "executed");
+  const latestBlocked =
+    events.find((e) => e.kind === "rejected" || e.kind === "expired" || e.kind === "cancelled") ??
+    undefined;
 
   return (
     <section id="proof" className="bg-surface-muted px-6">
       <div className="mx-auto max-w-[1200px] py-16 sm:py-20 lg:py-24">
         <div data-aos="fade-up" className="max-w-[56ch]">
           <Eyebrow>Live proof - on-chain</Eyebrow>
-          <h2 className="mt-4 text-heading leading-tight text-text-primary sm:text-heading-lg sm:leading-[1.1]" style={{fontWeight: 600}}>
-            Same agent. One variable.
+          <h2
+            className="mt-4 text-heading leading-tight text-text-primary sm:text-heading-lg sm:leading-[1.1]"
+            style={{fontWeight: 600}}
+          >
+            Same vault. One variable.
           </h2>
           <p className="mt-5 text-body text-text-secondary">
-            Two real actions on Arc testnet - an approved spend moved on-chain, then a
-            blocked attempt rejected by the policy. Live reads of the most recent activity
-            from the SpendArc vaults, not a simulation.
+            Two real reads from the Mandate vault on BOT Chain - an approved spend that settled,
+            and a request the policy stopped. Event history straight from the contract, not a
+            simulation and not a recorded row.
           </p>
         </div>
 
         <div className="mt-12 grid items-stretch gap-6 lg:grid-cols-[1fr_auto_1fr]">
           <div data-aos="fade-up" data-aos-duration="550">
-            <ProofColumn data={approved} />
+            <EventColumn
+              title="Settled"
+              subtitle="RequestExecuted"
+              events={latestExecuted ? [latestExecuted] : []}
+              loading={loading}
+              match={(e) => e.kind === "executed"}
+            />
           </div>
           <div className="flex items-center justify-center">
             <span className="rounded-full border border-border bg-white px-4 py-2 text-[11px] font-medium uppercase tracking-wider text-text-muted">
@@ -112,10 +157,24 @@ export function LiveProof() {
             </span>
           </div>
           <div data-aos="fade-up" data-aos-delay="150" data-aos-duration="550">
-            <ProofColumn data={blocked} />
+            <EventColumn
+              title="Stopped"
+              subtitle="rejected, expired, or cancelled"
+              events={latestBlocked ? [latestBlocked] : []}
+              loading={loading}
+              match={(e) => e.kind === "rejected" || e.kind === "expired" || e.kind === "cancelled"}
+            />
           </div>
         </div>
+
+        {events.length > 0 && !loading ? (
+          <p className="mt-6 text-center text-[12px] text-text-muted">
+            {events.length} spend event{events.length === 1 ? "" : "s"} read from the vault
+            {latestExecuted?.timestamp ? ` · newest settlement ${timeAgo(Number(latestExecuted.timestamp))}` : ""}
+          </p>
+        ) : null}
       </div>
     </section>
   );
 }
+

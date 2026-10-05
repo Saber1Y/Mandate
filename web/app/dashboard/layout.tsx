@@ -13,32 +13,21 @@ import { PageLoader } from "@/components/ui/PageLoader";
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Overview", icon: "grid" },
-  { href: "/dashboard/control", label: "Agent Control", icon: "bot" },
-  { href: "/dashboard/spending", label: "Spending", icon: "arrow-up-right" },
-  { href: "/dashboard/policies", label: "Policies", icon: "shield" },
+  { href: "/dashboard/requests", label: "Requests", icon: "scroll" },
   { href: "/dashboard/agents", label: "Agents", icon: "bot" },
-  { href: "/dashboard/allowlist", label: "Allowlist", icon: "list-check" },
-  { href: "/dashboard/payments", label: "Payments", icon: "credit-card" },
-  { href: "/dashboard/audit", label: "Audit Log", icon: "scroll" },
+  { href: "/dashboard/settings", label: "Settings", icon: "settings" },
 ] as const;
 
 const USER_NAV_ITEMS = [
   { href: "/dashboard", label: "Overview", icon: "grid" },
-  { href: "/dashboard/agents", label: "My Agent", icon: "bot" },
-  { href: "/dashboard/spending", label: "Spending", icon: "arrow-up-right" },
-  { href: "/dashboard/policies", label: "Policy", icon: "shield" },
-] as const;
-
-const USER_SECONDARY_ITEMS = [
+  { href: "/dashboard/requests", label: "Requests", icon: "scroll" },
   { href: "/dashboard/settings", label: "Settings", icon: "settings" },
 ] as const;
 
-const SECONDARY_ITEMS = [
-  { href: "/dashboard/settings", label: "Settings", icon: "settings" },
-] as const;
+const SECONDARY_ITEMS = [] as const;
 
-/** Pages a booth visitor (non-owner) is allowed to see. Everything else redirects to Overview. */
-const USER_ALLOWED = ["/dashboard", "/dashboard/agents", "/dashboard/spending", "/dashboard/policies", "/dashboard/settings"];
+/** Pages a non-owner may see. Agent registration is owner-only, so it is not listed. */
+const USER_ALLOWED = ["/dashboard", "/dashboard/requests", "/dashboard/settings"];
 
 function NavIcon({ icon }: { icon: string }) {
   const cls = "w-4 h-4 shrink-0";
@@ -207,8 +196,7 @@ function DashboardShell({
   }
 
   const navItems = isOwner ? NAV_ITEMS : USER_NAV_ITEMS;
-  const secondaryItems = isOwner ? SECONDARY_ITEMS : USER_SECONDARY_ITEMS;
-  const subtitle = isOwner ? "Agent Spending Control Plane" : "Your spending agent";
+  const subtitle = isOwner ? "Treasury control plane" : "Your agent";
 
   return (
     <div className="flex min-h-screen bg-surface-muted">
@@ -218,7 +206,7 @@ function DashboardShell({
         <div className="flex h-16 items-center gap-2.5 px-5">
           <div>
             <span className="text-md font-semibold text-white tracking-tight">
-              SpendArc
+              Mandate
             </span>
             <span className="block text-[10px] text-white/40 leading-none mt-0.5">
               {subtitle}
@@ -251,24 +239,6 @@ function DashboardShell({
             })}
           </div>
 
-          {secondaryItems.length > 0 ? (
-            <>
-              <div className="my-4 border-t border-white/8" />
-
-              <div className="space-y-0.5">
-                {secondaryItems.map((item) => (
-                  <Link
-                    key={item.href}
-                    href={item.href}
-                    className="flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium text-white/40 hover:bg-white/5 hover:text-white/60 transition motion-safe:active:scale-[0.98]"
-                  >
-                    <NavIcon icon={item.icon} />
-                    {item.label}
-                  </Link>
-                ))}
-              </div>
-            </>
-          ) : null}
         </nav>
 
         {/* Wallet & status */}

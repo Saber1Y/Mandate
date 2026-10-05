@@ -1,327 +1,202 @@
 "use client";
 
-import {useState, useEffect} from "react";
-import {useVaultState} from "@/lib/hooks";
-import {isSameAddress, truncateAddress} from "@/lib/format";
+import {useCallback, useEffect, useState} from "react";
+import type {Address} from "viem";
+import {
+  BOT_CHAIN_ID,
+  BOT_RPC_URL,
+  BOT_EXPLORER_URL,
+  TUSDT_ADDRESS,
+  mandateContracts,
+} from "@/lib/bot";
+import {mandateVaultAbi, mandateVaultFactoryAbi} from "@/lib/abi/mandate";
+import {publicClient} from "@/lib/chain";
+import {erc20Abi} from "@/lib/contracts";
+import {isSameAddress, truncateAddress, formatTusdt} from "@/lib/format";
+import {explorerAddress, explorerTx} from "@/lib/chain";
+import {useTreasuryState} from "@/lib/useChainRead";
 import {useActiveAddress} from "@/lib/usePrivyWallet";
-import {useRole, useMyAgent} from "@/lib/useRole";
-import {CONTRACTS} from "@/lib/contracts";
-import {explorerAddress} from "@/lib/chain";
+import {useRole} from "@/lib/useRole";
+import {Panel, PanelNote} from "@/components/dashboard/Panel";
+import {Card} from "@/components/ui/Card";
+import {StatTile} from "@/components/ui/StatTile";
+import {CopyChip, TxChip} from "@/components/ui/Chip";
+import {Skeleton} from "@/components/ui/Row";
 import {PageLoader} from "@/components/ui/PageLoader";
 
-type Health = {label: string; ok: boolean; detail?: string}[];
-
-function HealthIcon({ok}: {ok: boolean}) {
-  return (
-    <span
-      className={`inline-block h-1.5 w-1.5 rounded-full ${ok ? "bg-state-approved" : "bg-state-blocked"}`}
-    />
-  );
+interface DeploymentInfo {
+  chainId: number;
+  vaultOwner: Address;
+  factoryExecutor: Address;
+  deployer: Address;
+  vaultCount: bigint;
 }
 
-function SettingsSection({title, children, delay = 0}: {title: string; children: React.ReactNode; delay?: number}) {
-  return (
-    <div className="kpi-card p-5" data-aos="fade-up" data-aos-delay={delay}>
-      <div className="text-[11px] font-medium uppercase tracking-wider text-text-secondary mb-4">{title}</div>
-      {children}
-    </div>
-  );
-}
+/** Deployment facts and relayer posture. Read-only, but it is where an operator confirms the app points at the right vault. */
+export default function SettingsPage() {
+  const treasury = useTreasuryState();
+  const {address} = useActiveAddress();
+  const {isOwner, vaultOwner} = useRole();
+  const [deployment, setDeployment] = useState<DeploymentInfo | undefined>();
+  const [error, setError] = useState<string | undefined>();
 
-function CopyButton({value}: {value: string}) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <button
-      onClick={() => {
-        navigator.clipboard.writeText(value);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      }}
-      className="text-[11px] text-accent hover:underline shrink-0"
-    >
-      {copied ? "Copied" : "Copy"}
-    </button>
-  );
-}
-
-function OwnerSettings() {
-  const agent = "0x3F5b96A494061F7338Da529e3047809Ac6a7FB84" as const;
-  const {data: state, loading} = useVaultState(agent, CONTRACTS.vault);
-  const {address, isConnected} = useActiveAddress();
-  const [health, setHealth] = useState<Health>([]);
-  const [envVars, setEnvVars] = useState<Record<string, string>>({});
-
-  useEffect(() => {
-    const check = async () => {
-      const results: Health = [];
-
-      results.push({label: "Vault contract deployed", ok: !!state, detail: state ? CONTRACTS.vault : undefined});
-
-      if (state) {
-        results.push({
-          label: "Vault owner set",
-          ok: state.vaultOwner !== "0x0000000000000000000000000000000000000000",
-          detail: truncateAddress(state.vaultOwner),
-        });
-      }
-
-      results.push({label: "USDC configured", ok: CONTRACTS.usdc !== "0x0000000000000000000000000000000000000000"});
-
-      try {
-        const res = await fetch("/api/agents");
-        if (res.ok) {
-          const data = await res.json();
-          results.push({label: "Agents API", ok: true, detail: `${data.agents?.length ?? 0} agents`});
-        } else {
-          results.push({label: "Agents API", ok: false, detail: `${res.status}`});
-        }
-      } catch (e) {
-        results.push({label: "Agents API", ok: false, detail: (e as Error).message});
-      }
-
-      setHealth(results);
-    };
-    check();
-  }, [state]);
-
-  useEffect(() => {
-    setEnvVars({
-      NEXT_PUBLIC_VAULT_ADDRESS: CONTRACTS.vault,
-      NEXT_PUBLIC_ARC_EXPLORER_URL: process.env.NEXT_PUBLIC_ARC_EXPLORER_URL || "https://testnet.arcscan.app",
-    });
+  const load = useCallback(async () => {
+    try {
+      const {vault, factory} = mandateContracts();
+      // MandateVaultFactory is deliberately not Ownable: it has no owner, only an immutable
+      // executor and the original deployer. The vault owner is the org that called createVault.
+      const [chainId, vaultOwnerOnChain, factoryExecutor, deployer, vaultCount] = await Promise.all([
+        publicClient.getChainId(),
+        publicClient.readContract({address: vault, abi: mandateVaultAbi, functionName: "owner"}),
+        publicClient.readContract({address: factory, abi: mandateVaultFactoryAbi, functionName: "executor"}),
+        publicClient.readContract({address: factory, abi: mandateVaultFactoryAbi, functionName: "deployer"}),
+        publicClient.readContract({address: factory, abi: mandateVaultFactoryAbi, functionName: "vaultCount"}),
+      ]);
+      setDeployment({
+        chainId,
+        vaultOwner: vaultOwnerOnChain as Address,
+        factoryExecutor: factoryExecutor as Address,
+        deployer: deployer as Address,
+        vaultCount,
+      });
+      setError(undefined);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not read the factory.");
+    }
   }, []);
 
-  const isOwner = isConnected && !!state && isSameAddress(address, state.vaultOwner);
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (treasury.loading) return <PageLoader label="Reading deployment..." fill />;
+
+  const contracts = (() => {
+    try {
+      return mandateContracts();
+    } catch {
+      return null;
+    }
+  })();
+
+  /**
+   * Separation of powers, stated plainly.
+   *
+   * If the owner and the factory executor are the same address, one key can both approve a spend
+   * and broadcast it. That is fine for a testnet demo and unacceptable for an organization holding
+   * real funds, so it is surfaced rather than buried.
+   */
+  const keysCollide =
+    deployment !== undefined && isSameAddress(deployment.vaultOwner, deployment.factoryExecutor);
 
   return (
-    <div className="p-8 max-w-[900px] mx-auto">
-      <div className="mb-6" data-aos="fade-up">
+    <div className="p-6">
+      <header className="mb-6">
         <h1 className="text-[20px] font-semibold text-text-primary tracking-tight">Settings</h1>
-        <p className="text-[13px] text-text-muted mt-1">System configuration and environment</p>
-      </div>
+        <p className="mt-1 text-[13px] text-text-muted">Where this console is pointed, and who holds authority.</p>
+      </header>
 
-      <div className="space-y-6">
-        {/* Network */}
-        <SettingsSection title="Network">
-          <div className="space-y-2 text-[13px]">
-            <div className="flex items-center justify-between">
-              <span className="text-text-muted">Chain</span>
-              <span className="text-text-primary font-medium">Arc Testnet (5042002)</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-text-muted">RPC</span>
-              <span className="text-text-primary font-mono text-[12px] truncate max-w-[350px]">https://rpc.testnet.arc.network</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-text-muted">Explorer</span>
-              <span className="text-text-primary font-mono text-[12px] truncate max-w-[350px]">https://testnet.arcscan.app</span>
-            </div>
+      {keysCollide ? (
+        <div className="mb-4 rounded-lg border border-state-pending/40 bg-state-pending-light px-4 py-3">
+          <div className="text-[13px] font-semibold text-text-primary">
+            Owner and executor are the same address on this deployment.
           </div>
-        </SettingsSection>
+          <p className="mt-1 text-[12px] text-text-secondary">
+            A single key can approve and settle. Before an organization holds real funds, deploy a
+            fresh vault owned by the org smart account with a distinct gas-only executor.
+          </p>
+        </div>
+      ) : null}
 
-        {/* Vault */}
-        <SettingsSection title="Vault" delay={60}>
-          <div className="space-y-2 text-[13px]">
-            <div className="flex items-center justify-between">
-              <span className="text-text-muted">Address</span>
-              <span className="flex items-center gap-2">
-                <span className="text-text-primary font-mono text-[12px]">{truncateAddress(CONTRACTS.vault)}</span>
-                <CopyButton value={CONTRACTS.vault} />
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-text-muted">Owner</span>
-              <span className="flex items-center gap-2">
-                <span className="text-text-primary font-mono text-[12px]">
-                  {loading ? "..." : state ? truncateAddress(state.vaultOwner) : "-"}
-                </span>
-                {state && <CopyButton value={state.vaultOwner} />}
-              </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-text-muted">Explorer</span>
-              <a
-                href={explorerAddress(CONTRACTS.vault)}
-                target="_blank"
-                className="text-accent hover:underline text-[12px]"
-              >
-                View on Arcscan
-              </a>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-text-muted">USDC Token</span>
-              <span className="flex items-center gap-2">
-                <span className="text-text-primary font-mono text-[12px]">{truncateAddress(CONTRACTS.usdc)}</span>
-                <CopyButton value={CONTRACTS.usdc} />
-              </span>
-            </div>
-          </div>
-        </SettingsSection>
+      <div className="grid gap-4">
+        <Panel title="Network">
+          <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <Detail label="Chain">
+              {deployment?.chainId ?? "-"}
+              {deployment && deployment.chainId !== BOT_CHAIN_ID ? (
+                <span className="ml-2 text-state-blocked">expected {BOT_CHAIN_ID}</span>
+              ) : null}
+            </Detail>
+            <Detail label="RPC">{BOT_RPC_URL}</Detail>
+            <Detail label="Explorer">{BOT_EXPLORER_URL}</Detail>
+            <Detail label="tUSDT" href={explorerAddress(TUSDT_ADDRESS)}>
+              {TUSDT_ADDRESS}
+            </Detail>
+          </dl>
+        </Panel>
 
-        {/* Connected Wallet */}
-        <SettingsSection title="Wallet" delay={120}>
-          {isConnected && address ? (
-            <div className="space-y-2 text-[13px]">
-              <div className="flex items-center justify-between">
-                <span className="text-text-muted">Connected</span>
-                <span className="text-text-primary font-mono text-[12px]">{truncateAddress(address)}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-text-muted">Role</span>
-                <span className="flex items-center gap-1.5">
-                  <span className={`h-1.5 w-1.5 rounded-full ${isOwner ? "bg-state-approved" : "bg-text-muted"}`} />
-                  <span className="text-text-primary">{isOwner ? "Owner" : "Viewer"}</span>
-                </span>
-              </div>
-            </div>
+        <Panel title="Contracts">
+          {contracts ? (
+            <dl className="grid gap-3 sm:grid-cols-2">
+              <Detail label="Vault" href={explorerAddress(contracts.vault)}>
+                {contracts.vault}
+              </Detail>
+              <Detail label="Factory" href={explorerAddress(contracts.factory)}>
+                {contracts.factory}
+              </Detail>
+            </dl>
           ) : (
-            <div className="text-[13px] text-text-muted">Connect your wallet to manage vault settings.</div>
+            <PanelNote tone="error">
+              Mandate addresses are not configured. Set MANDATE_VAULT_ADDRESS and
+              MANDATE_FACTORY_ADDRESS in the environment.
+            </PanelNote>
           )}
-        </SettingsSection>
+          {error ? <p className="mt-3 text-[12px] text-state-blocked">{error}</p> : null}
+        </Panel>
 
-        {/* Environment Variables */}
-        <SettingsSection title="Environment" delay={180}>
-          <div className="space-y-2 text-[13px]">
-            {Object.entries(envVars).map(([key, value]) => (
-              <div key={key} className="flex items-center justify-between">
-                <span className="text-text-muted font-mono text-[12px]">{key}</span>
-                <span className="flex items-center gap-2">
-                  <span className="text-text-primary font-mono text-[12px] max-w-[300px] truncate">
-                    {value ? (key.includes("PRIVATE") ? "••••••••" : value) : "Not set"}
-                  </span>
-                  {value && !key.includes("PRIVATE") && <CopyButton value={value} />}
-                </span>
-              </div>
-            ))}
-          </div>
-        </SettingsSection>
+        <Panel title="Authority" subtitle="Who can approve, and who can settle">
+          {deployment ? (
+            <dl className="grid gap-3 sm:grid-cols-2">
+              <Detail label="Vault owner (approves)" href={explorerAddress(deployment.vaultOwner)}>
+                {deployment.vaultOwner}
+              </Detail>
+              <Detail label="Factory executor (settles)" href={explorerAddress(deployment.factoryExecutor)}>
+                {deployment.factoryExecutor}
+              </Detail>
+              <Detail label="Factory deployer" href={explorerAddress(deployment.deployer)}>
+                {deployment.deployer}
+              </Detail>
+            </dl>
+          ) : (
+            <div className="space-y-2">
+              <Skeleton className="h-6 w-full" />
+              <Skeleton className="h-6 w-2/3" />
+            </div>
+          )}
+        </Panel>
 
-        {/* Health Check */}
-        <SettingsSection title="System Health" delay={240}>
-          <div className="space-y-2">
-            {health.length === 0 ? (
-              <div className="text-[13px] text-text-muted">Checking...</div>
-            ) : (
-              health.map((h) => (
-                <div key={h.label} className="flex items-center justify-between text-[13px]">
-                  <span className="flex items-center gap-2">
-                    <HealthIcon ok={h.ok} />
-                    <span className={h.ok ? "text-text-primary" : "text-state-blocked"}>{h.label}</span>
-                  </span>
-                  {h.detail && <span className="text-text-muted font-mono text-[12px]">{h.detail}</span>}
-                </div>
-              ))
-            )}
-          </div>
-        </SettingsSection>
+        <Panel title="Your session">
+          <dl className="grid gap-3 sm:grid-cols-2">
+            <Detail label="Connected wallet">{address ?? "not connected"}</Detail>
+            <Detail label="Your role">
+              {address === undefined
+                ? "-"
+                : isOwner
+                  ? "owner"
+                  : vaultOwner && isSameAddress(address, vaultOwner)
+                    ? "owner"
+                    : "not an approver"}
+            </Detail>
+          </dl>
+        </Panel>
       </div>
     </div>
   );
 }
 
-function UserSettings() {
-  const {address, isConnected} = useActiveAddress();
-  const {agent} = useMyAgent();
-
+function Detail({label, children, href}: {label: string; children: React.ReactNode; href?: string}) {
   return (
-    <div className="p-8 max-w-[900px] mx-auto">
-      <div className="mb-6" data-aos="fade-up">
-        <h1 className="text-[20px] font-semibold text-text-primary tracking-tight">Settings</h1>
-        <p className="text-[13px] text-text-muted mt-1">Your agent, wallet, and the network it runs on</p>
-      </div>
-
-      <div className="space-y-6">
-        <SettingsSection title="Network">
-          <div className="space-y-2 text-[13px]">
-            <div className="flex items-center justify-between">
-              <span className="text-text-muted">Chain</span>
-              <span className="text-text-primary font-medium">Arc Testnet (5042002)</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-text-muted">RPC</span>
-              <span className="text-text-primary font-mono text-[12px] truncate max-w-[350px]">https://rpc.testnet.arc.network</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-text-muted">Explorer</span>
-              <span className="text-text-primary font-mono text-[12px] truncate max-w-[350px]">https://testnet.arcscan.app</span>
-            </div>
-          </div>
-        </SettingsSection>
-
-        <SettingsSection title="Wallet" delay={60}>
-          {isConnected && address ? (
-            <div className="space-y-2 text-[13px]">
-              <div className="flex items-center justify-between">
-                <span className="text-text-muted">Connected</span>
-                <span className="flex items-center gap-2">
-                  <span className="text-text-primary font-mono text-[12px]">{truncateAddress(address)}</span>
-                  <CopyButton value={address} />
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-text-muted">Role</span>
-                <span className="flex items-center gap-1.5">
-                  <span className="h-1.5 w-1.5 rounded-full bg-text-muted" />
-                  <span className="text-text-primary">User</span>
-                </span>
-              </div>
-            </div>
-          ) : (
-            <div className="text-[13px] text-text-muted">Connect your wallet to manage your agent.</div>
-          )}
-        </SettingsSection>
-
-        <SettingsSection title="Agent" delay={120}>
-          {agent ? (
-            <div className="space-y-2 text-[13px]">
-              <div className="flex items-center justify-between">
-                <span className="text-text-muted">Name</span>
-                <span className="text-text-primary font-medium">{agent.name}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-text-muted">Agent ID</span>
-                <span className="text-text-primary font-mono text-[12px]">{agent.id}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-text-muted">Agent address</span>
-                <span className="flex items-center gap-2">
-                  <a href={explorerAddress(agent.address as `0x${string}`)} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline text-[12px] font-mono">
-                    {truncateAddress(agent.address as `0x${string}`)}
-                  </a>
-                  <CopyButton value={agent.address} />
-                </span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-text-muted">Vault</span>
-                <span className="flex items-center gap-2">
-                  <a href={explorerAddress(CONTRACTS.vault)} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline text-[12px] font-mono">
-                    {truncateAddress(CONTRACTS.vault)}
-                  </a>
-                  <CopyButton value={CONTRACTS.vault} />
-                </span>
-              </div>
-            </div>
-          ) : (
-            <div className="text-[13px] text-text-muted">No agent registered for this wallet yet. Register one on My Agent.</div>
-          )}
-        </SettingsSection>
-
-        <SettingsSection title="Vault & Operator Settings" delay={180}>
-          <div className="text-[12px] text-text-muted">
-            Operator-only surfaces (funds management, global allowlists, audit log, deployment health) are not visible to users.
-          </div>
-        </SettingsSection>
-      </div>
+    <div>
+      <dt className="text-[11px] font-medium uppercase tracking-wider text-text-muted">{label}</dt>
+      <dd className="mt-1 break-all text-[12px] text-text-primary">
+        {href && typeof children === "string" ? (
+          <a href={href} target="_blank" rel="noopener noreferrer" className="font-mono text-accent hover:underline">
+            {truncateAddress(children)}
+          </a>
+        ) : (
+          children
+        )}
+      </dd>
     </div>
   );
-}
-
-export default function SettingsPage() {
-  const {isOwner, loading} = useRole();
-
-  if (loading) {
-    return <PageLoader label="Resolving your role..." fill />;
-  }
-
-  return isOwner ? <OwnerSettings /> : <UserSettings />;
 }

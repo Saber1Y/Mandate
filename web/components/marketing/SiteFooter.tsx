@@ -1,15 +1,29 @@
 import {Logo} from "@/components/ui/Logo";
 import {explorerAddress} from "@/lib/chain";
-import {CONTRACTS} from "@/lib/contracts";
+import {TUSDT_ADDRESS, BOT_EXPLORER_URL, mandateContracts} from "@/lib/bot";
 import {ArrowUpRight} from "@/components/ui/Icons";
 
-const links = [
-  {label: "Vault factory", href: explorerAddress(CONTRACTS.factory)},
-  {label: "USDC", href: explorerAddress(CONTRACTS.usdc)},
-  {label: "Explorer", href: "https://testnet.arcscan.app"},
-];
+/**
+ * Footer links are built from live config rather than hardcoded placeholders.
+ *
+ * If Mandate addresses are not configured the deployment links are dropped rather than rendered
+ * pointing at the zero address, which is what the previous CONTRACTS map would have done.
+ */
+function buildLinks(): {label: string; href: string}[] {
+  const links: {label: string; href: string}[] = [{label: "Explorer", href: BOT_EXPLORER_URL}];
+  try {
+    const {factory} = mandateContracts();
+    links.unshift({label: "Vault factory", href: explorerAddress(factory)});
+  } catch {
+    // Not configured in this build; omit instead of linking a meaningless address.
+  }
+  links.push({label: "tUSDT", href: explorerAddress(TUSDT_ADDRESS)});
+  return links;
+}
 
 export function SiteFooter() {
+  const links = buildLinks();
+
   return (
     <footer className="border-t border-border bg-white px-6">
       <div className="mx-auto flex max-w-[1200px] flex-col gap-8 py-12 sm:flex-row sm:items-end sm:justify-between">
@@ -17,13 +31,14 @@ export function SiteFooter() {
           <Logo height={30} />
 
           <p className="mt-3 max-w-[40ch] text-[12px] text-text-muted">
-            Programmable spending controls for autonomous AI agents. Agent Spending Control Plane.
+            On-chain spending controls for autonomous AI agents. The vault is the ledger; the
+            organization wallet holds the authority.
           </p>
         </div>
         <nav className="flex flex-wrap gap-x-6 gap-y-2">
           {links.map((l) => (
             <a
-              key={l.href}
+              key={l.label}
               href={l.href}
               target="_blank"
               rel="noopener noreferrer"

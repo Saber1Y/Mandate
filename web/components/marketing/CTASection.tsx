@@ -13,7 +13,7 @@ export function CTASection() {
           </h2>
           <p className="mx-auto mt-6 max-w-[52ch] text-body text-white/70">
             Your wallet, your vault, your leash. Create one, fund it, and watch approved and blocked agent
-            payments land live from the deployed contracts on Arc Testnet.
+            payments land live from the deployed contracts on BOT Chain.
           </p>
           <div className="mt-10 flex justify-center">
             <LinkButton href="/dashboard" variant="accent" size="md">

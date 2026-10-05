@@ -9,7 +9,7 @@ export function LoginGate() {
   return (
     <div className="flex min-h-screen flex-col items-center justify-center bg-surface-muted px-6">
       <div className="w-full max-w-sm text-center">
-        <div className="mb-2 text-[22px] font-semibold tracking-tight text-text-primary">SpendArc</div>
+        <div className="mb-2 text-[22px] font-semibold tracking-tight text-text-primary">Mandate</div>
         <div className="mb-8 text-[13px] text-text-muted">Agent spending control plane</div>
 
         <button

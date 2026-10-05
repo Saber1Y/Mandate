@@ -20,7 +20,7 @@ export function ProblemSection() {
           </p>
           <p>
             Humans need <span className="text-text-primary font-medium">caps, allowlists, dedup and receipts</span> - enforced
-            on-chain, not by app-layer goodwill. SpendArc gives the agent a wallet that holds nothing and can only
+            on-chain, not by app-layer goodwill. Mandate gives the agent a wallet that holds nothing and can only
             ever move value inside policy.
           </p>
         </div>

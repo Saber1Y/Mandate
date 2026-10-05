@@ -7,7 +7,7 @@ export function DashboardNav() {
       <nav className="mx-auto flex max-w-[1200px] items-center justify-between gap-4 rounded-lg border border-border bg-white/85 px-4 py-2.5 backdrop-blur-md shadow-card">
         <Link href="/" className="flex items-center px-2">
           <span className="text-[14px] font-semibold text-text-primary tracking-tight">
-            Spend<span className="text-accent">Arc</span>
+            Mand<span className="text-accent">ate</span>
           </span>
         </Link>
         <div className="flex items-center gap-2">

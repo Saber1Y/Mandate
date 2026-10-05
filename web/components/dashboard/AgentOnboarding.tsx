@@ -11,8 +11,8 @@ const STEPS = [
   {
     icon: Hand,
     step: "2",
-    title: "Fund it with USDC",
-    body: "Grab testnet funds and deposit USDC. Your agent can only spend what the vault holds.",
+    title: "Fund it with tUSDT",
+    body: "Grab testnet funds and deposit tUSDT. Your agent can only spend what the vault holds.",
   },
   {
     icon: Shield,
@@ -32,7 +32,7 @@ export function AgentOnboarding() {
         </div>
         <div className="text-[18px] font-semibold text-text-primary tracking-tight">Create your agent to get started</div>
         <div className="mt-2 max-w-[440px] text-[13px] text-text-muted">
-          Your wallet gets its own on-chain vault, deposits its own USDC, and the agent spends under a leash you set. It takes three
+          Your wallet gets its own on-chain vault, deposits its own tUSDT, and the agent spends under a leash you set. It takes three
           steps - about a minute.
         </div>
         <Link
