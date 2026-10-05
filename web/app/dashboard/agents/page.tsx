@@ -16,7 +16,7 @@ import {explorerAddress, publicClient} from "@/lib/chain";
 import {readServiceAllowlist, type ServiceAllowlistEntry} from "@/lib/reads";
 import {useTreasuryState} from "@/lib/useChainRead";
 import {useOwnerWrite} from "@/lib/useOwnerWrite";
-import {useWalletMessageSigner} from "@/lib/usePrivyWallet";
+import {useWalletMessageSigner, useActiveAddress} from "@/lib/usePrivyWallet";
 import {credentialAuthorizationMessage, type CredentialAction} from "@/lib/credentialAuth";
 import {useRole} from "@/lib/useRole";
 import {useVault} from "@/lib/useVault";
@@ -568,18 +568,24 @@ function ExecutorManager({vault, onChanged, disabled}: {vault: Address; onChange
  */
 function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0x${string}`; disabled: boolean}) {
   const {signMessage} = useWalletMessageSigner();
+  const {address: connected} = useActiveAddress();
   const [agentId, setAgentId] = useState("");
-  // Holds its own address rather than depending on the lookup above. Requiring a separate Look up
-  // first was a silent dead end: the form rendered disabled with the reason only on submit.
+  // createVault registers the caller as the vault's first agent, so the connected wallet is already a
+  // valid agent here and is what the operator almost always wants. Default to it rather than making
+  // them retype the address the app already knows.
   const [agentAddress, setAgentAddress] = useState(agent ?? "");
   const [busy, setBusy] = useState<CredentialAction | null>(null);
   const [error, setError] = useState<string | undefined>();
   const [issued, setIssued] = useState<{apiKey: string; keyHint: string} | null>(null);
 
-  // Follow the lookup when it changes, but never overwrite an address the operator typed here.
+  // Seed from the lookup when it resolves, but never clobber a different address in this field.
   useEffect(() => {
     if (agent) setAgentAddress(agent);
   }, [agent]);
+
+  // With no explicit choice, the connected owner is the agent.
+  const effectiveAddress = agentAddress.trim() || (connected ?? "");
+  const usingConnectedDefault = !agentAddress.trim() && !!connected;
 
   const run = async (action: CredentialAction) => {
     setError(undefined);
@@ -590,9 +596,9 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
       setError("agentId must be 2-64 characters of a-z, 0-9, underscore or dash.");
       return;
     }
-    const target = agentAddress.trim();
+    const target = effectiveAddress.trim();
     if (!isAddress(target)) {
-      setError("Enter the agent address this key belongs to.");
+      setError("Connect a wallet, or enter the agent address this key belongs to.");
       return;
     }
 
@@ -644,11 +650,14 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
             spellCheck={false}
           />
         </Field>
-        <Field label="Agent address" hint="Must already be registered on this vault.">
+        <Field
+          label="Agent address"
+          hint="Defaults to your connected wallet, which createVault registered as an agent. Change it only to issue a key for a different registered agent."
+        >
           <TextInput
-            value={agentAddress}
+            value={effectiveAddress}
             onChange={(e) => setAgentAddress(e.target.value)}
-            placeholder="0x..."
+            placeholder={connected ?? "0x..."}
             spellCheck={false}
             className="font-mono"
           />
@@ -667,17 +676,18 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
         </Button>
       </div>
 
-      {isAddress(agentAddress.trim()) ? (
+      {isAddress(effectiveAddress.trim()) ? (
         <PanelNote>
-          Authorizing <span className="tabular-nums">{truncateAddress(agentAddress.trim())}</span>. Rotate
-          revokes every existing key for this agent id before issuing a new one. Revoke leaves the
-          on-chain policy untouched: the key can no longer call the API, but the address keeps whatever
-          allowance it already had until the owner tightens it.
+          Authorizing <span className="tabular-nums">{truncateAddress(effectiveAddress.trim())}</span>
+          {usingConnectedDefault ? " (your connected wallet)" : ""}. Rotate revokes every existing key
+          for this agent id before issuing a new one. Revoke leaves the on-chain policy untouched: the
+          key can no longer call the API, but the address keeps whatever allowance it already had until
+          the owner tightens it.
         </PanelNote>
       ) : (
         <PanelNote>
-          Enter the agent address this key is for. The signature binds to it, and the server refuses a
-          signature naming an address that is not registered on this vault.
+          Connect a wallet to issue a key for yourself, or enter the address of an agent already
+          registered on this vault.
         </PanelNote>
       )}
 
