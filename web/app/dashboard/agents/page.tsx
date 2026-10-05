@@ -4,7 +4,11 @@ import {useCallback, useEffect, useState} from "react";
 import {TUSDT_ADDRESS} from "@/lib/bot";
 import {bytesToHex, isAddress, type Address} from "viem";
 import {mandateVaultAbi} from "@/lib/abi/mandate";
-import {parseTusdt} from "@/lib/contracts";
+import {
+  MAX_APPROVAL_THRESHOLD,
+  approvalThresholdHint,
+  parseApprovalThreshold,
+} from "@/lib/contracts";
 import {
   isSameAddress,
   truncateAddress,
@@ -148,6 +152,10 @@ function AgentEditor({vault, agent, onChanged}: {vault: Address; agent: `0x${str
   const [threshold, setThreshold] = useState("1");
   const [expiryDays, setExpiryDays] = useState("30");
   const [active, setActive] = useState(false);
+  const [policyError, setPolicyError] = useState<string | undefined>();
+
+  const days = Number(expiryDays);
+  const thresholdValue = parseApprovalThreshold(threshold);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -221,34 +229,35 @@ function AgentEditor({vault, agent, onChanged}: {vault: Address; agent: `0x${str
         className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"
         onSubmit={(e) => {
           e.preventDefault();
-          let maxTx: bigint;
-          let cap: bigint;
-          try {
-            maxTx = parseTusdt(maxPerTx);
-            cap = parseTusdt(dailyCap);
-          } catch {
-            return;
-          }
-          if (maxTx === 0n || cap === 0n) return;
+          const maxTx = tryParseTusdt(maxPerTx);
+          const cap = tryParseTusdt(dailyCap);
+          const thresholdValue = parseApprovalThreshold(threshold);
 
-          const days = Number(expiryDays);
+          // Validate everything and say why, instead of returning silently. A form that swallows a
+          // bad value looks identical to a form that is merely not submitting.
+          const problem =
+            maxTx === null || cap === null
+              ? "Caps must be positive tUSDT amounts with up to 6 decimal places."
+              : maxTx === 0n || cap === 0n
+                ? "A zero cap denies every spend. Set both caps above zero to let this agent spend."
+                : maxTx > cap
+                  ? "Max per transaction cannot exceed the daily cap."
+                  : thresholdValue === null
+                    ? `Approvals needed must be a whole number from 0 to ${MAX_APPROVAL_THRESHOLD}.`
+                    : !(days >= 0)
+                      ? "Expiry cannot be negative."
+                      : undefined;
+          setPolicyError(problem);
+          if (problem || maxTx === null || cap === null || thresholdValue === null) return;
+
           const expiryTs =
-            days > 0
-              ? BigInt(Math.floor(Date.now() / 1000) + days * 86_400)
-              : 0n;
+            days > 0 ? BigInt(Math.floor(Date.now() / 1000) + days * 86_400) : 0n;
 
           void savePolicy.run({
             address: vault,
             abi: mandateVaultAbi,
             functionName: "setAgentPolicy",
-            args: [
-              agent,
-              maxTx,
-              cap,
-              expiryTs,
-              Number(threshold) || 1,
-              active,
-            ],
+            args: [agent, maxTx, cap, expiryTs, thresholdValue, active],
           });
         }}
       >
@@ -258,8 +267,15 @@ function AgentEditor({vault, agent, onChanged}: {vault: Address; agent: `0x${str
         <Field label="Daily cap (tUSDT)">
           <TextInput value={dailyCap} onChange={(e) => setDailyCap(e.target.value)} inputMode="decimal" />
         </Field>
-        <Field label="Approvals needed">
-          <TextInput value={threshold} onChange={(e) => setThreshold(e.target.value)} inputMode="numeric" />
+        <Field label="Approvals needed" hint={approvalThresholdHint(thresholdValue)}>
+          <TextInput
+            value={threshold}
+            onChange={(e) => {
+              setThreshold(e.target.value);
+              setPolicyError(undefined);
+            }}
+            inputMode="numeric"
+          />
         </Field>
         <Field label="Expiry (days, 0 = never)">
           <TextInput value={expiryDays} onChange={(e) => setExpiryDays(e.target.value)} inputMode="numeric" />
@@ -273,7 +289,23 @@ function AgentEditor({vault, agent, onChanged}: {vault: Address; agent: `0x${str
           </Button>
         </div>
       </form>
+
+      {policyError ? <p className="text-[12px] text-state-blocked">{policyError}</p> : null}
       {savePolicy.error ? <p className="text-[12px] text-state-blocked">{savePolicy.error}</p> : null}
+
+      {/* Auto-approve removes the only human checkpoint, so state it rather than leaving it implied. */}
+      {thresholdValue === 0 ? (
+        <div className="mt-3 rounded-lg border border-state-pending/40 bg-state-pending-light px-4 py-3">
+          <div className="text-[13px] font-semibold text-text-primary">
+            This agent settles without human approval.
+          </div>
+          <p className="mt-1 text-[12px] text-text-secondary">
+            Requests are approved on arrival and the executor can spend immediately. The per-tx cap,
+            daily cap, token allowlist and recipient allowlist are then the only controls on where the
+            money goes. Raise this to at least 1 to require an owner signature first.
+          </p>
+        </div>
+      ) : null}
 
       <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
         <span className="text-[12px] text-text-muted">Settlement token allowlist</span>

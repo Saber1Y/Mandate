@@ -4,6 +4,11 @@ import {useCallback, useEffect, useState} from "react";
 import {BOT_CHAIN_ID, BOT_EXPLORER_URL, mandateFactory} from "@/lib/bot";
 import {mandateVaultFactoryAbi} from "@/lib/abi/mandate";
 import {tryParseTusdt, truncateAddress} from "@/lib/format";
+import {
+  MAX_APPROVAL_THRESHOLD,
+  approvalThresholdHint,
+  parseApprovalThreshold,
+} from "@/lib/contracts";
 import {usePrivyWalletClient} from "@/lib/usePrivyWallet";
 import {useOwnerWrite} from "@/lib/useOwnerWrite";
 import {useVault} from "@/lib/useVault";
@@ -67,7 +72,7 @@ export function Onboarding() {
   // would otherwise take down the whole onboarding screen instead of showing a validation message.
   const maxTxBase = tryParseTusdt(maxPerTx);
   const capBase = tryParseTusdt(dailyCap);
-  const thresholdValue = Number(threshold) || 0;
+  const thresholdValue = parseApprovalThreshold(threshold);
   const days = Number(expiryDays) || 0;
 
   const leashError =
@@ -77,8 +82,8 @@ export function Onboarding() {
         ? "Daily cap must be a positive number of tUSDT."
         : maxTxBase > capBase
           ? "Max per transaction cannot exceed the daily cap."
-          : thresholdValue < 1 || thresholdValue > 3
-            ? "Approvals needed must be between 1 and 3."
+          : thresholdValue === null
+            ? `Approvals needed must be a whole number from 0 to ${MAX_APPROVAL_THRESHOLD}.`
             : days < 0 || !Number.isFinite(days)
               ? "Expiry cannot be negative."
               : undefined;
@@ -130,7 +135,7 @@ export function Onboarding() {
                   inputMode="decimal"
                 />
               </Field>
-              <Field label="Approvals needed" hint="1 to 3. Above 1 needs a multi-approver org.">
+              <Field label="Approvals needed" hint={approvalThresholdHint(thresholdValue)}>
                 <TextInput
                   value={threshold}
                   onChange={(e) => setThreshold(e.target.value)}

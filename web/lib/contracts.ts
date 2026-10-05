@@ -74,3 +74,36 @@ export function requestStatusName(index: number | bigint): string {
 export function isBytes32(value: unknown): value is `0x${string}` {
   return typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value);
 }
+
+/**
+ * Approval threshold parsing, in one place because `0` and "missing" are not the same thing.
+ *
+ * `approvalThreshold == 0` means auto-approve: `requestSpend` files the request straight as Approved
+ * and the executor settles it with no human signature. Any value above 0 requires that many distinct
+ * approvers to sign on-chain first. That is the difference between an autonomous agent and a
+ * supervised one, so it must never be coerced by accident.
+ *
+ * Writing this as `Number(x) || 1` is the bug this replaces: it silently turns an intentional 0 into
+ * 1, which strips the human gate the operator explicitly asked to remove.
+ */
+export const MAX_APPROVAL_THRESHOLD = 3;
+
+/** Parse a threshold, returning null for anything that is not a usable 0..MAX approval count. */
+export function parseApprovalThreshold(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const n = Number(trimmed);
+  if (!Number.isSafeInteger(n) || n < 0 || n > MAX_APPROVAL_THRESHOLD) return null;
+  return n;
+}
+
+/** Plain-language consequence of a threshold, so no form has to re-explain it. */
+export function approvalThresholdHint(value: number | null): string {
+  if (value === null) return `Whole number, 0 to ${MAX_APPROVAL_THRESHOLD}.`;
+  if (value === 0) {
+    return "0 = settles with no human signature. The on-chain policy is then the only control.";
+  }
+  return value === 1
+    ? "1 = one owner or approver signs before it settles."
+    : `${value} = ${value} distinct approvers must sign before it settles.`;
+}
