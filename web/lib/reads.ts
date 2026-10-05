@@ -1,5 +1,5 @@
 import type {Address} from "viem";
-import {TUSDT_ADDRESS, mandateContracts} from "./bot";
+import {TUSDT_ADDRESS} from "./bot";
 import {publicClient} from "./chain";
 import {mandateVaultAbi} from "./abi/mandate";
 import {erc20Abi} from "./contracts";
@@ -59,8 +59,7 @@ async function readOrThrow<T>(fn: () => Promise<T>, what: string): Promise<T> {
   }
 }
 
-export async function readTreasuryState(): Promise<TreasuryState> {
-  const {vault} = mandateContracts();
+export async function readTreasuryState(vault: Address): Promise<TreasuryState> {
   return readOrThrow(async () => {
     const [vaultOwner, treasuryBalance, paused] = await Promise.all([
       publicClient.readContract({address: vault, abi: mandateVaultAbi, functionName: "owner"}),
@@ -82,11 +81,10 @@ export async function readTreasuryState(): Promise<TreasuryState> {
   }, "treasury state");
 }
 
-export async function readAgentBudget(agent: Address): Promise<AgentBudgetState> {
-  const {vault} = mandateContracts();
+export async function readAgentBudget(vault: Address, agent: Address): Promise<AgentBudgetState> {
   return readOrThrow(async () => {
     const [treasury, policy, remaining, tokenAllowed, registered] = await Promise.all([
-      readTreasuryState(),
+      readTreasuryState(vault),
       publicClient.readContract({
         address: vault,
         abi: mandateVaultAbi,
@@ -120,8 +118,7 @@ export async function readAgentBudget(agent: Address): Promise<AgentBudgetState>
   }, `budget for agent ${agent}`);
 }
 
-export async function readServicePolicy(agent: Address, target: Address): Promise<ServicePolicy> {
-  const {vault} = mandateContracts();
+export async function readServicePolicy(vault: Address, agent: Address, target: Address): Promise<ServicePolicy> {
   return readOrThrow(
     async () =>
       (await publicClient.readContract({
@@ -179,10 +176,10 @@ async function blockTimestamp(blockNumber: bigint): Promise<bigint> {
  * One request row. `null` means the id does not exist on this vault, which is a real answer rather
  * than an error, so callers can drop unknown ids instead of rendering garbage.
  */
-async function readRequest(requestId: `0x${string}`) {
+async function readRequest(vault: Address, requestId: `0x${string}`) {
   try {
     const request = await publicClient.readContract({
-      address: mandateContracts().vault,
+      address: vault,
       abi: mandateVaultAbi,
       functionName: "getRequest",
       args: [requestId],
@@ -194,12 +191,13 @@ async function readRequest(requestId: `0x${string}`) {
 }
 
 export async function readSpendHistory(params: {
+  vault: Address;
   agent?: Address;
   fromBlock?: bigint;
   toBlock?: bigint;
   limit?: number;
 }): Promise<SpendEvent[]> {
-  const {vault} = mandateContracts();
+  const {vault} = params;
   const limit = params.limit ?? 50;
 
   const eventNames = [
@@ -266,13 +264,13 @@ export async function readSpendHistory(params: {
 
       const requestId = (args.requestId as `0x${string}`) ?? ("0x" as `0x${string}`);
       if (params.agent && !agent) {
-        const request = await readRequest(requestId);
+        const request = await readRequest(vault, requestId);
         if (!request) continue;
         agent = request.agent;
       }
       if (params.agent && agent && agent.toLowerCase() !== params.agent.toLowerCase()) continue;
       if (!token || !target || amount === 0n) {
-        const request = await readRequest(requestId);
+        const request = await readRequest(vault, requestId);
         if (!request) continue;
         token = token ?? request.token;
         target = target ?? request.target;

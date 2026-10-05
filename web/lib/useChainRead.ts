@@ -2,7 +2,7 @@
 
 import {useCallback, useEffect, useState} from "react";
 import type {Address} from "viem";
-import {mandateContracts, MissingMandateConfigError} from "./bot";
+import {mandateFactory, MissingMandateConfigError} from "./bot";
 import {
   readAgentBudget,
   readSpendHistory,
@@ -72,10 +72,20 @@ function useAsyncRead<T>(
   return {data, loading, error, refetch};
 }
 
-/** Treasury-level reads: vault owner, settlement balance, paused flag. */
-export function useTreasuryState(): AsyncState<TreasuryState> {
-  const read = useCallback(() => readTreasuryState(), []);
-  return useAsyncRead(read, []);
+/**
+ * Treasury-level reads: vault owner, settlement balance, paused flag.
+ *
+ * Takes the vault explicitly. With no vault the state is idle, which is what an address that has
+ * not onboarded should see - not an error page claiming the chain is broken.
+ */
+export function useTreasuryState(vault?: Address): AsyncState<TreasuryState> {
+  const read = useCallback(async () => {
+    if (!vault) throw new Error("No vault.");
+    return readTreasuryState(vault);
+  }, [vault]);
+  const state = useAsyncRead(read, [vault]);
+  if (!vault) return {loading: false, refetch: state.refetch};
+  return state;
 }
 
 /**
@@ -85,13 +95,13 @@ export function useTreasuryState(): AsyncState<TreasuryState> {
  * normal condition for a page that calls this hook unconditionally, and surfacing it as a failure
  * would make the panel claim something is broken when nothing is.
  */
-export function useAgentBudget(agent?: Address): AsyncState<AgentBudgetState> {
+export function useAgentBudget(vault?: Address, agent?: Address): AsyncState<AgentBudgetState> {
   const read = useCallback(async () => {
-    if (!agent) throw new Error("No agent connected.");
-    return readAgentBudget(agent);
-  }, [agent]);
-  const state = useAsyncRead(read, [agent]);
-  if (!agent) return {loading: false, refetch: state.refetch};
+    if (!vault || !agent) throw new Error("No agent connected.");
+    return readAgentBudget(vault, agent);
+  }, [vault, agent]);
+  const state = useAsyncRead(read, [vault, agent]);
+  if (!vault || !agent) return {loading: false, refetch: state.refetch};
   return state;
 }
 
@@ -103,29 +113,36 @@ export function useAgentBudget(agent?: Address): AsyncState<AgentBudgetState> {
  * public RPC is the usual cause of a slow first paint.
  */
 export function useSpendHistory(params: {
+  vault?: Address;
   agent?: Address;
   fromBlock?: bigint;
   toBlock?: bigint;
   limit?: number;
 } = {}): AsyncState<SpendEvent[]> {
-  const {agent, fromBlock, toBlock, limit} = params;
+  const {vault, agent, fromBlock, toBlock, limit} = params;
   const read = useCallback(
-    () => readSpendHistory({agent, fromBlock, toBlock, limit}),
-    [agent, fromBlock, toBlock, limit],
+    () => readSpendHistory({vault: vault as Address, agent, fromBlock, toBlock, limit}),
+    [vault, agent, fromBlock, toBlock, limit],
   );
-  return useAsyncRead(read, [agent, fromBlock, toBlock, limit]);
+  const state = useAsyncRead(read, [vault, agent, fromBlock, toBlock, limit]);
+  if (!vault) return {loading: false, refetch: state.refetch};
+  return state;
 }
 
-/** True when the app has enough configuration to talk to a vault at all. */
-export function useMandateConfigured(): {configured: boolean; vault?: Address; error?: string} {
-  const [result, setResult] = useState<{configured: boolean; vault?: Address; error?: string}>({
+/**
+ * True when the app knows which factory to talk to.
+ *
+ * The vault is no longer part of this: it is resolved per connected address from the factory, so
+ * "configured" now means only that onboarding is possible at all.
+ */
+export function useMandateConfigured(): {configured: boolean; factory?: Address; error?: string} {
+  const [result, setResult] = useState<{configured: boolean; factory?: Address; error?: string}>({
     configured: false,
   });
 
   useEffect(() => {
     try {
-      const {vault} = mandateContracts();
-      setResult({configured: true, vault});
+      setResult({configured: true, factory: mandateFactory()});
     } catch (e) {
       setResult({
         configured: false,

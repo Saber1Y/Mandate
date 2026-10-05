@@ -1,6 +1,6 @@
 import {createPublicClient, createWalletClient, http, type Address, type Hex} from "viem";
 import {privateKeyToAccount} from "viem/accounts";
-import {botChain, mandateContracts} from "./bot";
+import {botChain} from "./bot";
 import {mandateVaultAbi} from "./abi/mandate";
 
 /**
@@ -98,6 +98,7 @@ function wallet() {
  * reverts here and never reaches an approver.
  */
 export async function relayRequestSpend(params: {
+  vault: Address;
   agent: Address;
   token: Address;
   recipient: Address;
@@ -105,7 +106,7 @@ export async function relayRequestSpend(params: {
   idempotencyKey: Hex;
   expiresAt?: bigint;
 }): Promise<RelayerResult> {
-  const {vault} = mandateContracts();
+  const {vault} = params;
   return submit(async (client) =>
     client.writeContract({
       address: vault,
@@ -128,8 +129,7 @@ export async function relayRequestSpend(params: {
  * Settle an Approved request. `_execute` re-validates the entire policy at settlement time, so a
  * request approved earlier still reverts if the balance dropped or the policy tightened since.
  */
-export async function relayExecute(requestId: Hex): Promise<RelayerResult> {
-  const {vault} = mandateContracts();
+export async function relayExecute(vault: Address, requestId: Hex): Promise<RelayerResult> {
   return submit(async (client) =>
     client.writeContract({
       address: vault,
@@ -142,8 +142,7 @@ export async function relayExecute(requestId: Hex): Promise<RelayerResult> {
 }
 
 /** Read the request back from the chain. Returns null when the id is unknown. */
-export async function readRequest(requestId: Hex) {
-  const {vault} = mandateContracts();
+export async function readRequest(vault: Address, requestId: Hex) {
   try {
     const request = await publicClient().readContract({
       address: vault,
@@ -173,8 +172,7 @@ export interface MandateRequest {
 }
 
 /** Throw when the configured executor is not registered on the vault, with the fix spelled out. */
-export async function assertExecutorRegistered(): Promise<void> {
-  const {vault} = mandateContracts();
+export async function assertExecutorRegistered(vault: Address): Promise<void> {
   const account = executorAccount();
   const ok = await publicClient().readContract({
     address: vault,

@@ -28,6 +28,21 @@ export function parseTusdt(amount: string): bigint {
   return BigInt(whole) * 10n ** BigInt(TUSDT_DECIMALS) + BigInt(padded || "0");
 } 
 
+/**
+ * Non-throwing variant for render paths.
+ *
+ * `parseTusdt` throws by design so submit handlers can bail out. Calling it during render turns a
+ * half-typed field like "1." or "" into a thrown error that unmounts the whole form, so any code
+ * that parses while rendering must use this and handle the null.
+ */
+export function tryParseTusdt(amount: string): bigint | null {
+  try {
+    return parseTusdt(amount);
+  } catch {
+    return null;
+  }
+}
+
 export function truncateAddress(addr: string, lead = 6, tail = 4): string {
   if (!addr) return "";
   return `${addr.slice(0, lead)}…${addr.slice(-tail)}`;

@@ -1,7 +1,7 @@
 "use client";
 
 import {useState} from "react";
-import type {Abi} from "viem";
+import type {Abi, Hex} from "viem";
 import {botChain} from "./bot";
 import {usePrivyWalletClient} from "./usePrivyWallet";
 import {waitForReceiptRaw} from "./txwait";
@@ -22,7 +22,11 @@ export type WriteStatus = {pending: boolean; error?: string; okKey?: number};
  * `run` resolves to whether the transaction actually succeeded, because callers must not present
  * success for a write that reverted or never landed.
  */
-export function useOwnerWrite(refetch: () => void) {
+/**
+ * `refetch` receives the transaction hash on success so a caller can link the confirmed write.
+ * Existing callers that only need a refresh pass a thunk that ignores the argument.
+ */
+export function useOwnerWrite(refetch: (txHash?: Hex) => void) {
   const {getClient} = usePrivyWalletClient();
   const [status, setStatus] = useState<WriteStatus>({pending: false});
 
@@ -41,7 +45,7 @@ export function useOwnerWrite(refetch: () => void) {
         setStatus({pending: false, error: "Transaction reverted on-chain"});
         return false;
       }
-      refetch(); // read-back the resulting state
+      refetch(hash); // read-back the resulting state
       setStatus({pending: false, okKey: Date.now()});
       return true;
     } catch (e) {

@@ -1,15 +1,14 @@
 import {parseAbi, type Address} from "viem";
 import {mandateVaultAbi, mandateVaultFactoryAbi} from "./abi/mandate";
-import {TUSDT_ADDRESS, TUSDT_DECIMALS, mandateContracts, type MandateContracts} from "./bot";
+import {TUSDT_ADDRESS, TUSDT_DECIMALS, mandateFactory} from "./bot";
 
 export {
   mandateVaultAbi,
   mandateVaultFactoryAbi,
   TUSDT_ADDRESS,
   TUSDT_DECIMALS,
-  mandateContracts,
+  mandateFactory,
 };
-export type {MandateContracts};
 
 /** Re-exported so UI code never hand-rolls base-unit arithmetic. */
 export {parseTusdt, formatTusdt} from "./format";

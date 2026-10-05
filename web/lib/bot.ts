@@ -52,6 +52,9 @@ export class MissingMandateConfigError extends Error {
   }
 }
 
+/** The zero address, which is how the factory reports "this org has no vault yet". */
+export const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
+
 /**
  * Contract addresses are never hardcoded. The placeholder addresses inherited from SpendArc are
  * exactly what the migration audit flagged, so an unset value fails loudly instead of silently
@@ -62,21 +65,17 @@ function requiredAddress(value: string | undefined, name: string): Address {
   return value as Address;
 }
 
-export type MandateContracts = {
-  vault: Address;
-  factory: Address;
-};
-
 /**
- * Read from NEXT_PUBLIC_MANDATE_VAULT_ADDRESS / NEXT_PUBLIC_MANDATE_FACTORY_ADDRESS so the vault is
- * selected per environment rather than per deployment assumption.
+ * The factory is the ONLY deployment-wide address.
+ *
+ * The vault is deliberately not configured here. One org gets one vault, and which vault that is
+ * depends on who is asking: it is resolved per connected address from `vaultOf(address)`. A single
+ * hardcoded vault address would be wrong the moment a second org onboarded, and would silently let
+ * one org's UI read another org's treasury.
  */
-export function mandateContracts(): MandateContracts {
-  return {
-    vault: requiredAddress(process.env.NEXT_PUBLIC_MANDATE_VAULT_ADDRESS, "NEXT_PUBLIC_MANDATE_VAULT_ADDRESS"),
-    factory: requiredAddress(
-      process.env.NEXT_PUBLIC_MANDATE_FACTORY_ADDRESS,
-      "NEXT_PUBLIC_MANDATE_FACTORY_ADDRESS",
-    ),
-  };
+export function mandateFactory(): Address {
+  return requiredAddress(
+    process.env.NEXT_PUBLIC_MANDATE_FACTORY_ADDRESS,
+    "NEXT_PUBLIC_MANDATE_FACTORY_ADDRESS",
+  );
 }
