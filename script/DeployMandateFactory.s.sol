@@ -1,0 +1,40 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.28;
+
+import {Script, console2} from "forge-std/Script.sol";
+import {MandateVaultFactory} from "../src/MandateVaultFactory.sol";
+
+/// @notice Deploy the MandateVaultFactory on BOT Chain Bohr Testnet.
+///
+/// @dev Usage:
+///        export PRIVATE_KEY=0x...
+///        export MANDATE_EXECUTOR_ADDRESS=0x...   # optional, defaults to the deployer
+///        forge script script/DeployMandateFactory.s.sol \
+///          --rpc-url https://rpc.bohr.life --broadcast
+///
+///      The chain id is asserted before broadcasting so a misconfigured RPC can never publish a
+///      factory to the wrong network. The executor is a gas-only relayer: it can settle approved
+///      requests and nothing else, and each org can revoke or rotate it on its own vault through
+///      `setExecutor`, which is owner-only.
+contract DeployMandateFactory is Script {
+    uint256 internal constant BOT_CHAIN_ID = 968;
+
+    error WrongChain(uint256 actual);
+
+    function run() external returns (MandateVaultFactory factory) {
+        if (block.chainid != BOT_CHAIN_ID) revert WrongChain(block.chainid);
+
+        uint256 deployerKey = vm.envUint("PRIVATE_KEY");
+        address deployer = vm.addr(deployerKey);
+        address executor = vm.envOr("MANDATE_EXECUTOR_ADDRESS", deployer);
+
+        vm.startBroadcast(deployerKey);
+        factory = new MandateVaultFactory(executor);
+        vm.stopBroadcast();
+
+        console2.log("MandateVaultFactory :", address(factory));
+        console2.log("deployer            :", deployer);
+        console2.log("executor (gas-only) :", executor);
+        console2.log("chainid             :", block.chainid);
+    }
+}
