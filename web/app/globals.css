@@ -1,9 +1,10 @@
 @import "tailwindcss";
 
 /* ============================================================================
-   SpendArc design system
-   Agent Spending Control Plane
-   Arc blockchain blue primary accent, dark sidebar, clean SaaS dashboard
+   Mandate design system
+   Treasury control plane for autonomous agents
+   Teal primary accent (--color-accent is the source of truth for
+   the mark in components/ui/Logo.tsx and scripts/render-icon.mjs), clean light dashboard
    ========================================================================== */
 @theme {
   /* Core palette */
@@ -14,11 +15,11 @@
   --color-surface-muted: #f6f8fa;
   --color-surface-hover: #eef0f2;
 
-  /* Arc blockchain blue (primary) */
-  --color-accent: #0066cc;
-  --color-accent-hover: #0052a3;
-  --color-accent-light: #f0f7ff;
-  --color-accent-muted: #b3d4ff;
+  /* Primary accent - teal. Keep in step with ACCENT in scripts/render-icon.mjs. */
+  --color-accent: #0f766e;
+  --color-accent-hover: #0b5f58;
+  --color-accent-light: #f0fdfa;
+  --color-accent-muted: #99f6e4;
 
   /* Semantic states */
   --color-state-approved: #22c55e;
@@ -37,8 +38,8 @@
   --color-border-strong: #cbd5e1;
 
   /* Brand */
-  --color-brand: #0066cc;
-  --color-brand-light: #f0f7ff;
+  --color-brand: #0f766e;
+  --color-brand-light: #f0fdfa;
 
   /* Typography */
   --font-sans: var(--font-sora), "Sora", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
