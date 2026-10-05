@@ -9,7 +9,10 @@
     "typecheck": "tsc --noEmit",
     "sync:abi": "node scripts/sync-abi.mjs",
     "check:abi": "node scripts/sync-abi.mjs --check",
-    "qa:agent": "node scripts/qa-agent.mjs"
+    "qa:agent": "node scripts/qa-agent.mjs",
+    "mcp": "node mcp/server.mjs",
+    "mcp:check": "node scripts/check-mcp.mjs",
+    "icon": "node scripts/render-icon.mjs"
   },
   "dependencies": {
     "@libsql/client": "^0.17.4",
