@@ -18,6 +18,7 @@ import {
 } from "@/lib/format";
 import {explorerAddress, publicClient} from "@/lib/chain";
 import {readServiceAllowlist, type ServiceAllowlistEntry} from "@/lib/reads";
+import {agentHandoffPrompt} from "@/lib/handoff";
 import {useTreasuryState} from "@/lib/useChainRead";
 import {useOwnerWrite} from "@/lib/useOwnerWrite";
 import {useWalletMessageSigner, useActiveAddress} from "@/lib/usePrivyWallet";
@@ -609,6 +610,8 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
   const [busy, setBusy] = useState<CredentialAction | null>(null);
   const [error, setError] = useState<string | undefined>();
   const [issued, setIssued] = useState<{apiKey: string; keyHint: string} | null>(null);
+  const [handoff, setHandoff] = useState<string | undefined>();
+  const [handoffCopied, setHandoffCopied] = useState(false);
 
   // Seed from the lookup when it resolves, but never clobber a different address in this field.
   useEffect(() => {
@@ -619,7 +622,60 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
   const effectiveAddress = agentAddress.trim() || (connected ?? "");
   const usingConnectedDefault = !agentAddress.trim() && !!connected;
 
-  const run = async (action: CredentialAction) => {
+  /**
+ * Build the handoff prompt from live chain state.
+ *
+ * Every number is read after the key is issued rather than reused from a form, because the prompt is
+ * an instruction to another agent and a stale cap in it would produce confident, well-formatted
+ * requests that policy rejects for a reason the agent cannot see.
+ */
+const buildHandoff = useCallback(
+  async (apiKey: string, agent: Address) => {
+    try {
+      const [policy, remaining, allowlist] = await Promise.all([
+        publicClient.readContract({
+          address: vault,
+          abi: mandateVaultAbi,
+          functionName: "getPolicy",
+          args: [agent],
+        }),
+        publicClient.readContract({
+          address: vault,
+          abi: mandateVaultAbi,
+          functionName: "remainingDailyCap",
+          args: [agent],
+        }),
+        readServiceAllowlist({vault, agent}).catch(() => []),
+      ]);
+      const baseUrl = typeof window === "undefined" ? "" : window.location.origin;
+      setHandoff(
+        agentHandoffPrompt(
+          {
+            agent,
+            maxPerTx: policy.maxPerTx,
+            dailyCap: policy.dailyCap,
+            remainingDailyCap: remaining,
+            approvalThreshold: Number(policy.approvalThreshold),
+            policyExpiry: policy.expiry,
+            tokenAddress: TUSDT_ADDRESS,
+            tokenSymbol: "tUSDT",
+            recipients: allowlist
+              .filter((r) => r.allowed)
+              .map((r) => ({address: r.target, label: r.label, maxPerTx: r.maxPerTx})),
+            vault,
+          },
+          {baseUrl, apiKey},
+        ),
+      );
+    } catch {
+      // The key is still valid and shown above; a failed prompt build must not block issuing it.
+      setHandoff(undefined);
+    }
+  },
+  [vault],
+);
+
+const run = async (action: CredentialAction) => {
     setError(undefined);
     setIssued(null);
 
@@ -660,7 +716,11 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
         setError(payload.error ?? `Request failed with ${res.status}`);
         return;
       }
-      if (payload.apiKey) setIssued({apiKey: payload.apiKey, keyHint: payload.keyHint ?? ""});
+      if (payload.apiKey) {
+        setIssued({apiKey: payload.apiKey, keyHint: payload.keyHint ?? ""});
+        setHandoff(undefined);
+        void buildHandoff(payload.apiKey, target as Address);
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not complete the request.");
     } finally {
@@ -737,6 +797,46 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
             Copy it into the agent&rsquo;s secret store now. Mandate keeps only a SHA-256 hash, so it
             cannot be shown again - a lost key is replaced by rotating, never recovered.
           </p>
+          <div className="mt-3 border-t border-state-approved/20 pt-3">
+            <div className="text-[12px] font-medium text-text-primary">
+              Give this to the agent
+            </div>
+            <p className="mt-0.5 text-[11px] text-text-muted">
+              The prompt below carries the key, your live leash in readable numbers, and the exact
+              calls to make. Paste it into the agent as-is; it is built from the chain right now, so it
+              cannot describe a policy that has since changed.
+            </p>
+            <div className="mt-2 flex gap-2">
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={!handoff}
+                onClick={() => {
+                  if (!handoff) return;
+                  void navigator.clipboard
+                    .writeText(handoff)
+                    .then(() => setHandoffCopied(true))
+                    .catch(() => setHandoffCopied(false))
+                    .finally(() => setTimeout(() => setHandoffCopied(false), 1500));
+                }}
+              >
+                {handoffCopied ? "Copied" : "Copy handoff prompt"}
+              </Button>
+            </div>
+            {handoff ? (
+              <textarea
+                readOnly
+                value={handoff}
+                rows={10}
+                aria-label="Agent handoff prompt"
+                className="mt-2 w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 text-[11px] leading-relaxed text-text-primary outline-none"
+              />
+            ) : (
+              <p className="mt-2 text-[11px] text-state-pending">
+                Reading this agent&rsquo;s live policy from the chain...
+              </p>
+            )}
+          </div>
         </div>
       ) : null}
     </div>
