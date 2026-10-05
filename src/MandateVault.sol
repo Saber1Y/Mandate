@@ -166,6 +166,8 @@ contract MandateVault {
     error AlreadyApproved();
     error NativeTransferFailed();
     error InsufficientBalance();
+    /// @notice A policy or recipient expiry was set to a moment already in the past.
+    error ExpiryInPast();
 
     modifier onlyOwner() {
         if (msg.sender != owner) revert NotOwner();
@@ -184,6 +186,17 @@ contract MandateVault {
         _;
     }
 
+    /// @dev Reject an expiry that has already elapsed.
+    ///
+    ///      0 means "never" and is always allowed. Anything else must be in the future: writing a
+    ///      past timestamp produces a policy that silently refuses every future request with
+    ///      DeadlinePassed, so the owner sees an agent that looks configured and cannot spend, and
+    ///      the only symptom is a failing request. Catching it at write time turns a confusing
+    ///      runtime failure into an immediate, named error.
+    function _requireFutureExpiry(uint64 expiry) internal view {
+        if (expiry != 0 && expiry < block.timestamp) revert ExpiryInPast();
+    }
+
     /// @param maxPerTx Per-transaction cap in base units (6 decimals for tUSDT). 0 denies spends.
     /// @param approvalThreshold Distinct approvers required before a request can execute.
     ///                         0 means auto-approve on request.
@@ -197,6 +210,7 @@ contract MandateVault {
     ) {
         if (owner_ == address(0)) revert NotOwner();
         if (maxPerTx > dailyCap) revert InvalidPolicy();
+        _requireFutureExpiry(expiry);
 
         owner = owner_;
         if (executor_ != address(0)) executors[executor_] = true;
@@ -270,6 +284,7 @@ contract MandateVault {
     ) external onlyOwner {
         if (agent == address(0)) revert NotAgent();
         if (maxPerTx > dailyCap) revert InvalidPolicy();
+        _requireFutureExpiry(expiry);
 
         Policy storage p = policies[agent];
         p.maxPerTx = maxPerTx;
@@ -295,6 +310,7 @@ contract MandateVault {
         if (agent == address(0)) revert NotAgent();
         if (target == address(0)) revert InvalidPolicy();
         if (maxPerTx != 0 && dailyCap != 0 && maxPerTx > dailyCap) revert InvalidPolicy();
+        _requireFutureExpiry(expiry);
 
         ServicePolicy storage s = services[agent][target];
         s.allowed = allowed;

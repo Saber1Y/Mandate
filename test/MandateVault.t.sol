@@ -977,3 +977,110 @@ contract MandateVaultTest is Test {
         assertEq(uint8(vault.getRequestStatus(id)), uint8(MandateVault.RequestStatus.Pending));
     }
 }
+
+/// @notice Expiry validation: a policy or recipient entry must not be written already elapsed.
+///
+/// @dev    The bug this covers was reachable only from the owner, so it was never a security hole -
+///         but it bricked an agent silently. A vault configured with a past expiry looks complete
+///         and refuses every request with DeadlinePassed, and the owner has to notice that before
+///         they can work out why an agent that "has a policy" cannot spend.
+contract MandateVaultExpiryTest is Test {
+    MandateVault vault;
+    MockUSD usdt;
+
+    address org = makeAddr("org");
+    address executor = makeAddr("executor");
+    address agent = makeAddr("agent");
+    address recipient = makeAddr("recipient");
+    address stranger = makeAddr("stranger");
+
+    uint256 constant MAX_TX = 100e6;
+    uint256 constant DAILY = 500e6;
+    uint256 constant START = 1_700_000_000;
+    uint256 constant DAY = 86_400;
+
+    function setUp() public {
+        vm.warp(START);
+        usdt = new MockUSD();
+        vm.prank(org);
+        vault = new MandateVault(org, executor, 0, 0, 0, 0);
+
+        vm.startPrank(org);
+        vault.setAgent(agent, true);
+        vault.setAllowedToken(agent, address(usdt), true);
+        vault.setAgentPolicy(agent, MAX_TX, DAILY, 0, 1, true);
+        vault.setAllowedService(agent, recipient, "vendor", 0, 0, 0, true);
+        vm.stopPrank();
+
+        usdt.mint(address(vault), 10_000e6);
+    }
+
+    function test_Revert_SetAgentPolicy_PastExpiry() public {
+        vm.prank(org);
+        vm.expectRevert(MandateVault.ExpiryInPast.selector);
+        vault.setAgentPolicy(agent, MAX_TX, DAILY, uint64(block.timestamp - 1), 1, true);
+    }
+
+    function test_Revert_SetAllowedService_PastExpiry() public {
+        vm.prank(org);
+        vm.expectRevert(MandateVault.ExpiryInPast.selector);
+        vault.setAllowedService(agent, recipient, "vendor", 0, 0, uint64(block.timestamp - 1), true);
+    }
+
+    function test_Revert_Constructor_PastExpiry() public {
+        vm.prank(org);
+        vm.expectRevert(MandateVault.ExpiryInPast.selector);
+        new MandateVault(org, executor, MAX_TX, DAILY, uint64(block.timestamp - 1), 1);
+    }
+
+    /// @dev 0 still means "never", including at the current block timestamp, so existing
+    ///      deployments and the default path are unaffected.
+    function test_Expiry_ZeroIsNeverAndAllowed() public {
+        vm.prank(org);
+        vault.setAgentPolicy(agent, MAX_TX, DAILY, 0, 1, true);
+        MandateVault.Policy memory p = vault.getPolicy(agent);
+        assertEq(p.expiry, 0, "zero expiry must stay zero");
+        assertEq(p.active, true);
+    }
+
+    function test_Expiry_FutureIsAccepted() public {
+        uint64 future = uint64(block.timestamp + 30 * DAY);
+        vm.prank(org);
+        vault.setAgentPolicy(agent, MAX_TX, DAILY, future, 1, true);
+
+        MandateVault.Policy memory p = vault.getPolicy(agent);
+        assertEq(p.expiry, future, "future expiry must be stored verbatim");
+    }
+
+    /// @dev The timestamp equal to now is not yet past; rejecting it would break the legitimate
+    ///      case of a policy that expires at the end of the current block.
+    function test_Expiry_CurrentBlockIsAccepted() public {
+        uint64 nowTs = uint64(block.timestamp);
+        vm.prank(org);
+        vault.setAgentPolicy(agent, MAX_TX, DAILY, nowTs, 1, true);
+
+        MandateVault.Policy memory p = vault.getPolicy(agent);
+        assertEq(p.expiry, nowTs);
+    }
+
+    /// @dev Only the owner can write policy, so a non-owner must still fail with NotOwner rather
+    ///      than reaching the expiry check.
+    function test_Revert_NonOwnerCannotWriteExpiredPolicy() public {
+        vm.prank(stranger);
+        vm.expectRevert(MandateVault.NotOwner.selector);
+        vault.setAgentPolicy(agent, MAX_TX, DAILY, uint64(block.timestamp - 1), 1, true);
+    }
+
+    /// @dev Revoking and re-adding is how an owner recovers, and it must still work while the
+    ///      existing policy is live.
+    function test_Expiry_CanBeTightenedAfterRevocation() public {
+        vm.prank(org);
+        vault.setAgentPolicy(agent, MAX_TX, DAILY, uint64(block.timestamp + 10 * DAY), 1, false);
+
+        assertEq(vault.getPolicy(agent).active, false, "policy must be inactive after revoke");
+
+        vm.prank(org);
+        vault.setAgentPolicy(agent, MAX_TX, DAILY, 0, 1, true);
+        assertEq(vault.getPolicy(agent).active, true, "policy must be restorable");
+    }
+}
