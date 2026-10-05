@@ -7,6 +7,7 @@ import {publicClient} from "@/lib/chain";
 import {mandateVaultAbi} from "@/lib/abi/mandate";
 import {isBytes32, requestStatusName} from "@/lib/contracts";
 import {assertExecutorRegistered, readRequest, relayRequestSpend} from "@/lib/relayer";
+import {recordRejectedAttempt} from "@/lib/attempts";
 
 /**
  * Agent spend request.
@@ -128,6 +129,20 @@ export async function POST(request: Request) {
   if (!result.success) {
     // Surface the contract's custom error so an agent can tell "not allowlisted" from "over cap".
     const status = result.reason ? 422 : 502;
+    if (result.reason) {
+      // The revert left no event and no gas spent, so the chain holds no trace of this attempt.
+      // Record it so the operator can answer "why is my agent not spending?".
+      recordRejectedAttempt({
+        vault,
+        agent: credential.agentAddress,
+        agentId: credential.agentId,
+        recipient: body.recipient as string,
+        amount: amount.toString(),
+        token,
+        reason: result.reason,
+        detail: result.error,
+      });
+    }
     return NextResponse.json(
       {error: result.error ?? "Relayed request failed.", reason: result.reason ?? null},
       {status},

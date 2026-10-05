@@ -3,6 +3,7 @@
 import {useCallback, useEffect, useState} from "react";
 import type {Address} from "viem";
 import {mandateFactory, MissingMandateConfigError} from "./bot";
+import type {RejectedAttempt} from "./attempts";
 import {
   readAgentBudget,
   readSpendHistory,
@@ -127,6 +128,24 @@ export function useSpendHistory(params: {
   const state = useAsyncRead(read, [vault, agent, fromBlock, toBlock, limit]);
   if (!vault) return {loading: false, refetch: state.refetch};
   return state;
+}
+
+/**
+ * Recent policy rejections, from the server-side attempt log rather than the chain.
+ *
+ * Deliberately not a chain read: a refused request reverts, so it emits nothing and there is nothing
+ * to query. See lib/attempts for why that log is not a second ledger.
+ */
+export function useRejectedAttempts(limit = 25): AsyncState<RejectedAttempt[]> {
+  return useAsyncRead(
+    async () => {
+      const res = await fetch(`/api/agents/attempts?limit=${limit}`);
+      if (!res.ok) throw new Error(`Could not load rejections (HTTP ${res.status}).`);
+      const body = (await res.json()) as {attempts?: RejectedAttempt[]};
+      return body.attempts ?? [];
+    },
+    [limit],
+  );
 }
 
 /**
