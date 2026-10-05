@@ -653,6 +653,7 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
   const [issued, setIssued] = useState<{apiKey: string; keyHint: string} | null>(null);
   const [handoff, setHandoff] = useState<string | undefined>();
   const [handoffCopied, setHandoffCopied] = useState(false);
+  const [existingKey, setExistingKey] = useState("");
 
   // Seed from the lookup when it resolves, but never clobber a different address in this field.
   useEffect(() => {
@@ -826,6 +827,41 @@ const run = async (action: CredentialAction) => {
 
       {error ? <p className="text-[12px] text-state-blocked">{error}</p> : null}
 
+      {/* A key issued before this panel existed has no prompt, and a prompt is never persisted
+          because it embeds the plaintext key. Rebuilding it from a key the operator already holds
+          happens entirely in the browser: the key is never sent anywhere, which is the same
+          property that lets the server store only a hash. */}
+      {!issued && /^mdt_[A-Za-z0-9]{20,}$/.test(existingKey.trim()) ? (
+        <div className="rounded-lg border border-border bg-surface-muted px-4 py-3">
+          <div className="text-[12px] font-medium text-text-primary">
+            Already have a key? Build its handoff prompt
+          </div>
+          <p className="mt-0.5 text-[11px] text-text-muted">
+            Paste the key to generate the same briefing. This happens in your browser and the key is
+            not transmitted.
+          </p>
+          <div className="mt-2 flex flex-wrap items-end gap-2">
+            <div className="min-w-[240px] flex-1">
+              <TextInput
+                value={existingKey}
+                onChange={(e) => setExistingKey(e.target.value)}
+                placeholder="mdt_..."
+                spellCheck={false}
+                className="font-mono"
+              />
+            </div>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={!isAddress(effectiveAddress.trim())}
+              onClick={() => void buildHandoff(existingKey.trim(), effectiveAddress.trim() as Address)}
+            >
+              Build prompt
+            </Button>
+          </div>
+        </div>
+      ) : null}
+
       {issued ? (
         <div className="rounded-lg border border-state-approved/30 bg-state-approved-light px-4 py-3">
           <div className="text-[12px] font-medium text-state-approved">
@@ -838,46 +874,41 @@ const run = async (action: CredentialAction) => {
             Copy it into the agent&rsquo;s secret store now. Mandate keeps only a SHA-256 hash, so it
             cannot be shown again - a lost key is replaced by rotating, never recovered.
           </p>
-          <div className="mt-3 border-t border-state-approved/20 pt-3">
-            <div className="text-[12px] font-medium text-text-primary">
-              Give this to the agent
-            </div>
-            <p className="mt-0.5 text-[11px] text-text-muted">
-              The prompt below carries the key, your live leash in readable numbers, and the exact
-              calls to make. Paste it into the agent as-is; it is built from the chain right now, so it
-              cannot describe a policy that has since changed.
-            </p>
-            <div className="mt-2 flex gap-2">
-              <Button
-                size="sm"
-                variant="secondary"
-                disabled={!handoff}
-                onClick={() => {
-                  if (!handoff) return;
-                  void navigator.clipboard
-                    .writeText(handoff)
-                    .then(() => setHandoffCopied(true))
-                    .catch(() => setHandoffCopied(false))
-                    .finally(() => setTimeout(() => setHandoffCopied(false), 1500));
-                }}
-              >
-                {handoffCopied ? "Copied" : "Copy handoff prompt"}
-              </Button>
-            </div>
-            {handoff ? (
-              <textarea
-                readOnly
-                value={handoff}
-                rows={10}
-                aria-label="Agent handoff prompt"
-                className="mt-2 w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 text-[11px] leading-relaxed text-text-primary outline-none"
-              />
-            ) : (
-              <p className="mt-2 text-[11px] text-state-pending">
-                Reading this agent&rsquo;s live policy from the chain...
-              </p>
-            )}
+        </div>
+      ) : null}
+
+      {/* Rendered whenever a prompt exists, not only in the issue-and-immediately-read state, so it
+          survives navigating away and back within the session. */}
+      {handoff ? (
+        <div className="rounded-lg border border-border bg-surface-muted px-4 py-3">
+          <div className="text-[12px] font-medium text-text-primary">Give this to the agent</div>
+          <p className="mt-0.5 text-[11px] text-text-muted">
+            Carries the key, your live leash in readable numbers, and the exact calls to make. Paste
+            it into the agent as-is; it is built from the chain right now, so it cannot describe a
+            policy that has since changed.
+          </p>
+          <div className="mt-2 flex gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => {
+                void navigator.clipboard
+                  .writeText(handoff)
+                  .then(() => setHandoffCopied(true))
+                  .catch(() => setHandoffCopied(false))
+                  .finally(() => setTimeout(() => setHandoffCopied(false), 1500));
+              }}
+            >
+              {handoffCopied ? "Copied" : "Copy handoff prompt"}
+          </Button>
           </div>
+          <textarea
+            readOnly
+            value={handoff}
+            rows={12}
+            aria-label="Agent handoff prompt"
+            className="mt-2 w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 text-[11px] leading-relaxed text-text-primary outline-none"
+          />
         </div>
       ) : null}
     </div>
