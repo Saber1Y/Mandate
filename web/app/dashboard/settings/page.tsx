@@ -1,28 +1,27 @@
 "use client";
 
 import {useCallback, useEffect, useState} from "react";
-import type {Address} from "viem";
-import {
-  BOT_CHAIN_ID,
-  BOT_RPC_URL,
-  BOT_EXPLORER_URL,
-  TUSDT_ADDRESS,
-  mandateContracts,
-} from "@/lib/bot";
+import {isAddress, type Address, type Hex} from "viem";
+import {BOT_CHAIN_ID, BOT_RPC_URL, BOT_EXPLORER_URL, TUSDT_ADDRESS, mandateFactory} from "@/lib/bot";
 import {mandateVaultAbi, mandateVaultFactoryAbi} from "@/lib/abi/mandate";
 import {publicClient} from "@/lib/chain";
 import {erc20Abi} from "@/lib/contracts";
-import {isSameAddress, truncateAddress, formatTusdt} from "@/lib/format";
+import {isSameAddress, tryParseTusdt, truncateAddress, truncateHash, formatTusdt} from "@/lib/format";
 import {explorerAddress, explorerTx} from "@/lib/chain";
 import {useTreasuryState} from "@/lib/useChainRead";
 import {useActiveAddress} from "@/lib/usePrivyWallet";
+import {useOwnerWrite} from "@/lib/useOwnerWrite";
 import {useRole} from "@/lib/useRole";
+import {useVault} from "@/lib/useVault";
 import {Panel, PanelNote} from "@/components/dashboard/Panel";
-import {Card} from "@/components/ui/Card";
-import {StatTile} from "@/components/ui/StatTile";
-import {CopyChip, TxChip} from "@/components/ui/Chip";
+import {Button} from "@/components/ui/Button";
+import {Field, TextInput} from "@/components/ui/Input";
 import {Skeleton} from "@/components/ui/Row";
 import {PageLoader} from "@/components/ui/PageLoader";
+
+/** tUSDT, or the chain's native gas token as the contract spells it. */
+type WithdrawToken = Address | "native";
+const NATIVE = "native" as const;
 
 interface DeploymentInfo {
   chainId: number;
@@ -34,7 +33,8 @@ interface DeploymentInfo {
 
 /** Deployment facts and relayer posture. Read-only, but it is where an operator confirms the app points at the right vault. */
 export default function SettingsPage() {
-  const treasury = useTreasuryState();
+  const {vault} = useVault();
+  const treasury = useTreasuryState(vault);
   const {address} = useActiveAddress();
   const {isOwner, vaultOwner} = useRole();
   const [deployment, setDeployment] = useState<DeploymentInfo | undefined>();
@@ -42,12 +42,18 @@ export default function SettingsPage() {
 
   const load = useCallback(async () => {
     try {
-      const {vault, factory} = mandateContracts();
+      const factory = mandateFactory();
       // MandateVaultFactory is deliberately not Ownable: it has no owner, only an immutable
       // executor and the original deployer. The vault owner is the org that called createVault.
       const [chainId, vaultOwnerOnChain, factoryExecutor, deployer, vaultCount] = await Promise.all([
         publicClient.getChainId(),
-        publicClient.readContract({address: vault, abi: mandateVaultAbi, functionName: "owner"}),
+        // Resolved from the connected address rather than configured, so "your authority" always
+        // describes the treasury this session can actually act on.
+        publicClient.readContract({
+          address: vault as Address,
+          abi: mandateVaultAbi,
+          functionName: "owner",
+        }),
         publicClient.readContract({address: factory, abi: mandateVaultFactoryAbi, functionName: "executor"}),
         publicClient.readContract({address: factory, abi: mandateVaultFactoryAbi, functionName: "deployer"}),
         publicClient.readContract({address: factory, abi: mandateVaultFactoryAbi, functionName: "vaultCount"}),
@@ -63,7 +69,7 @@ export default function SettingsPage() {
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not read the factory.");
     }
-  }, []);
+  }, [vault]);
 
   useEffect(() => {
     void load();
@@ -71,9 +77,9 @@ export default function SettingsPage() {
 
   if (treasury.loading) return <PageLoader label="Reading deployment..." fill />;
 
-  const contracts = (() => {
+  const factory = (() => {
     try {
-      return mandateContracts();
+      return mandateFactory();
     } catch {
       return null;
     }
@@ -126,19 +132,18 @@ export default function SettingsPage() {
         </Panel>
 
         <Panel title="Contracts">
-          {contracts ? (
+          {factory && vault ? (
             <dl className="grid gap-3 sm:grid-cols-2">
-              <Detail label="Vault" href={explorerAddress(contracts.vault)}>
-                {contracts.vault}
+              <Detail label="Your vault" href={explorerAddress(vault)}>
+                {vault}
               </Detail>
-              <Detail label="Factory" href={explorerAddress(contracts.factory)}>
-                {contracts.factory}
+              <Detail label="Factory" href={explorerAddress(factory)}>
+                {factory}
               </Detail>
             </dl>
           ) : (
             <PanelNote tone="error">
-              Mandate addresses are not configured. Set MANDATE_VAULT_ADDRESS and
-              MANDATE_FACTORY_ADDRESS in the environment.
+              The Mandate factory address is not configured. Set NEXT_PUBLIC_MANDATE_FACTORY_ADDRESS.
             </PanelNote>
           )}
           {error ? <p className="mt-3 text-[12px] text-state-blocked">{error}</p> : null}
@@ -179,8 +184,134 @@ export default function SettingsPage() {
             </Detail>
           </dl>
         </Panel>
+
+{isOwner && vault && treasury.data ? (
+          <OwnerWithdraw vault={vault} destination={address} balance={treasury.data.treasuryBalance} />
+        ) : null}
       </div>
     </div>
+  );
+}
+
+/**
+ * Owner-only treasury withdrawal.
+ *
+ * `withdrawToken` is `onlyOwner`, so an approver without owner authority never sees this. The form
+ * defaults the destination to the connected owner wallet rather than to a stored value, because a
+ * remembered recipient is exactly how funds get sent somewhere nobody re-reads.
+ */
+function OwnerWithdraw({
+  vault,
+  destination,
+  balance,
+}: {
+  vault: Address;
+  destination: Address | undefined;
+  balance: bigint;
+}) {
+  const [recipient, setRecipient] = useState(destination ?? "");
+  const [amount, setAmount] = useState("");
+  const [token, setToken] = useState<WithdrawToken>(TUSDT_ADDRESS);
+  const [done, setDone] = useState<Hex | undefined>();
+
+  // The read-back matters most here: withdrawing only counts as done once the chain confirms it,
+  // and the treasury balance the parent re-reads is what proves the money actually left.
+  const onWithdrawn = useCallback((hash?: Hex) => setDone(hash), []);
+  const withdraw = useOwnerWrite(onWithdrawn);
+
+  const to = recipient.trim();
+  const parsed = tryParseTusdt(amount);
+  const amountFilled = amount.trim() !== "";
+
+  const error = !isAddress(to)
+    ? "Recipient must be a valid address."
+    : amountFilled && parsed === null
+      ? token === NATIVE
+        ? "Amount must be an integer in wei. tUSDT amounts may use up to 6 decimal places."
+        : "Amount must be a tUSDT amount with up to 6 decimal places."
+      : amountFilled && parsed !== null && parsed <= 0n
+        ? "Amount must be greater than zero."
+        : token !== NATIVE && parsed !== null && parsed > balance
+          ? "Amount is more than the treasury holds."
+          : undefined;
+
+  return (
+    <Panel title="Withdraw from treasury" subtitle="Owner only. Moves funds out of Mandate entirely.">
+      <form
+        className="space-y-4"
+onSubmit={(e) => {
+              e.preventDefault();
+              // Empty amount is a no-op rather than an error: the form stays disabled only on a
+              // genuinely invalid value, and an untouched field should not block typing.
+              if (error || parsed === null || parsed <= 0n) return;
+              setDone(undefined);
+              void withdraw.run({
+                address: vault,
+                abi: mandateVaultAbi,
+                functionName: "withdrawToken",
+                args: [token, to as Address, parsed],
+              });
+            }}
+      >
+        <div className="grid gap-4 sm:grid-cols-3">
+          <Field label="Token">
+            <select
+              value={token}
+              onChange={(e) => {
+                setToken(e.target.value as WithdrawToken);
+                setDone(undefined);
+              }}
+              className="h-9 w-full rounded-md border border-border bg-surface px-2.5 text-[13px] text-text-primary outline-none focus:border-accent"
+            >
+              <option value={TUSDT_ADDRESS}>tUSDT</option>
+              <option value={NATIVE}>Native gas token</option>
+            </select>
+          </Field>
+          <Field label="Amount">
+            <TextInput
+              value={amount}
+              onChange={(e) => {
+                setAmount(e.target.value);
+                setDone(undefined);
+              }}
+              inputMode="decimal"
+              placeholder={token === NATIVE ? "wei" : "e.g. 25.00"}
+            />
+          </Field>
+          <Field label="Recipient" hint="Defaults to your connected wallet.">
+            <TextInput
+              value={recipient}
+              onChange={(e) => {
+                setRecipient(e.target.value);
+                setDone(undefined);
+              }}
+              placeholder={destination ?? "0x…"}
+              className="font-mono"
+            />
+          </Field>
+        </div>
+
+        {error ? <p className="text-[12px] text-state-blocked">{error}</p> : null}
+        {withdraw.error ? <p className="text-[12px] text-state-blocked">{withdraw.error}</p> : null}
+        {done ? (
+          <p className="text-[12px] text-state-ok">
+            Withdrawn in{" "}
+            <a href={explorerTx(done)} target="_blank" rel="noopener noreferrer" className="font-mono text-accent hover:underline">
+              {truncateHash(done)}
+            </a>
+          </p>
+        ) : null}
+
+        <div className="flex items-center justify-between gap-3 border-t border-border pt-4">
+          <p className="text-[11px] text-text-muted">
+            Treasury holds {formatTusdt(balance)} tUSDT. Withdrawing is not reversible from Mandate.
+          </p>
+          <Button type="submit" disabled={!!error || withdraw.pending || !amountFilled}>
+            {withdraw.pending ? "Confirming..." : "Withdraw"}
+          </Button>
+        </div>
+      </form>
+    </Panel>
   );
 }
 
