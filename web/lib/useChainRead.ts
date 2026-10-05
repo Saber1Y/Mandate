@@ -78,13 +78,21 @@ export function useTreasuryState(): AsyncState<TreasuryState> {
   return useAsyncRead(read, []);
 }
 
-/** One agent's live policy and remaining budget. */
+/**
+ * One agent's live policy and remaining budget.
+ *
+ * With no connected address this reports an idle state rather than an error: "not connected" is a
+ * normal condition for a page that calls this hook unconditionally, and surfacing it as a failure
+ * would make the panel claim something is broken when nothing is.
+ */
 export function useAgentBudget(agent?: Address): AsyncState<AgentBudgetState> {
-  const read = useCallback(() => {
+  const read = useCallback(async () => {
     if (!agent) throw new Error("No agent connected.");
     return readAgentBudget(agent);
   }, [agent]);
-  return useAsyncRead(read, [agent]);
+  const state = useAsyncRead(read, [agent]);
+  if (!agent) return {loading: false, refetch: state.refetch};
+  return state;
 }
 
 /**

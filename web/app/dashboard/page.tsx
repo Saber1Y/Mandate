@@ -9,7 +9,7 @@ import {requestStatusName} from "@/lib/contracts";
 import {publicClient} from "@/lib/chain";
 import {isSameAddress, formatTusdt, truncateAddress, truncateHash, timeAgo} from "@/lib/format";
 import {explorerAddress, explorerTx} from "@/lib/chain";
-import {useTreasuryState, useSpendHistory} from "@/lib/useChainRead";
+import {useTreasuryState, useSpendHistory, useAgentBudget} from "@/lib/useChainRead";
 import {useActiveAddress, usePrivyWalletClient} from "@/lib/usePrivyWallet";
 import {useRole} from "@/lib/useRole";
 import {useOwnerWrite} from "@/lib/useOwnerWrite";
@@ -46,11 +46,31 @@ export default function DashboardPage() {
   const {address} = useActiveAddress();
   const {isOwner, isApprover} = useRole();
 
+  // Per-user state. The treasury tiles below are shared public facts and deliberately identical for
+  // everyone, but authority and budget are not: they are resolved against the connected address, so
+  // switching wallets must change what this page claims about you.
+  const mine = useAgentBudget(address);
+
   const pending = usePendingRequests();
   const settled = useMemo(
     () => (history.data ?? []).filter((e) => e.kind === "executed").slice(0, 6),
     [history.data],
   );
+
+  const myRequests = useMemo(
+    () => (history.data ?? []).filter((e) => isSameAddress(e.agent, address)),
+    [history.data, address],
+  );
+
+  const role = !address
+    ? undefined
+    : isOwner
+      ? "Owner"
+      : isApprover
+        ? "Approver"
+        : mine.data?.registered
+          ? "Agent"
+          : "Viewer";
 
   if (treasury.loading) return <PageLoader label="Reading the vault on BOT Chain..." fill />;
 
@@ -106,6 +126,80 @@ export default function DashboardPage() {
             sub={<span className="text-text-muted">owner controls pause</span>}
           />
         </Card>
+      </div>
+
+      <div className="mt-4">
+        <Panel
+          title="Your access"
+          subtitle="Resolved against the connected wallet on every wallet change"
+        >
+          {!address ? (
+            <PanelNote>Connect a wallet to see the authority this vault grants you.</PanelNote>
+          ) : (
+            <>
+              <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <Detail label="Connected wallet" href={explorerAddress(address)}>
+                  {address}
+                </Detail>
+                <Detail label="Role on this vault">{role}</Detail>
+                <Detail label="Your requests">{myRequests.length}</Detail>
+                <Detail label="Vault owner">{truncateAddress(t.vaultOwner)}</Detail>
+              </dl>
+
+              {mine.data?.registered ? (
+                <div className="mt-4 border-t border-border pt-4">
+                  <div className="mb-3 flex items-baseline justify-between gap-3">
+                    <h2 className="text-[13px] font-medium text-text-primary">
+                      Your spending budget
+                    </h2>
+                    <span className="text-[11px] text-text-muted">
+                      the vault enforces these, not this page
+                    </span>
+                  </div>
+                  <dl className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <Detail label="Max per request">{formatTusdt(mine.data.policy.maxPerTx)} tUSDT</Detail>
+                    <Detail label="Daily cap">{formatTusdt(mine.data.policy.dailyCap)} tUSDT</Detail>
+                    <Detail label="Spent today">{formatTusdt(mine.data.policy.spentToday)} tUSDT</Detail>
+                    <Detail label="Remaining today">
+                      {formatTusdt(mine.data.remainingDailyCap)} tUSDT
+                    </Detail>
+                    <Detail label="Approvals required">
+                      {mine.data.policy.approvalThreshold === 0
+                        ? "none (auto-approved)"
+                        : String(mine.data.policy.approvalThreshold)}
+                    </Detail>
+                    <Detail label="tUSDT settlement">{mine.data.tokenAllowed ? "Allowed" : "Blocked"}</Detail>
+                    <Detail label="Policy status">
+                      {mine.data.policy.active ? "Active" : "Paused"}
+                    </Detail>
+                    <Detail label="Policy expires">
+                      {mine.data.policy.expiry === 0n
+                        ? "never"
+                        : new Date(Number(mine.data.policy.expiry) * 1000).toLocaleString()}
+                    </Detail>
+                  </dl>
+                  <div className="mt-3">
+                    <DailyCapMeter
+                      spent={mine.data.policy.spentToday}
+                      cap={mine.data.policy.dailyCap}
+                      remaining={mine.data.remainingDailyCap}
+                    />
+                  </div>
+                </div>
+              ) : mine.loading ? (
+                <div className="mt-4 border-t border-border pt-4">
+                  <Skeleton className="h-12 w-full" />
+                </div>
+              ) : (
+                <p className="mt-4 border-t border-border pt-4 text-[12px] text-text-muted">
+                  {role === "Viewer"
+                    ? "This address has no policy on this vault, so it cannot request a spend. That is the default for every new address."
+                    : "You have treasury authority rather than a spending budget. Authority is decided by the vault owner, not by an agent policy."}
+                </p>
+              )}
+            </>
+          )}
+        </Panel>
       </div>
 
       <div className="mt-4 grid gap-4 lg:grid-cols-2">
