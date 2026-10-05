@@ -1,14 +1,31 @@
 import {formatUnits, type Address} from "viem";
-import {USDC_DECIMALS} from "./contracts";
+import {TUSDT_DECIMALS} from "./bot";
 
-/** USDC is 6 decimals — base-unit math everywhere, format only at display. */
-export function formatUsdc(base: bigint, opts: {maxFractionDigits?: number} = {}): string {
-  const s = formatUnits(base, USDC_DECIMALS);
+/**
+ * tUSDT has 6 decimals, same as the USDC it replaces. All arithmetic stays in base units
+ * (`uint256`) end to end; this is the only place a value becomes a human string.
+ */
+export function formatTusdt(base: bigint, opts: {maxFractionDigits?: number} = {}): string {
+  const s = formatUnits(base, TUSDT_DECIMALS);
   const n = Number(s);
   return n.toLocaleString("en-US", {
     minimumFractionDigits: 2,
     maximumFractionDigits: opts.maxFractionDigits ?? 2,
   });
+}
+
+/** Parse a human tUSDT string into base units. Throws on anything ambiguous rather than rounding. */
+export function parseTusdt(amount: string): bigint {
+  const raw = amount.trim();
+  if (!/^\d+(\.\d+)?$/.test(raw)) {
+    throw new Error(`Invalid tUSDT amount: ${raw}`);
+  }
+  const [whole, frac = ""] = raw.split(".");
+  if (frac.length > TUSDT_DECIMALS) {
+    throw new Error(`tUSDT supports at most ${TUSDT_DECIMALS} decimal places`);
+  }
+  const padded = frac.padEnd(TUSDT_DECIMALS, "0");
+  return BigInt(whole) * 10n ** BigInt(TUSDT_DECIMALS) + BigInt(padded || "0");
 } 
 
 export function truncateAddress(addr: string, lead = 6, tail = 4): string {

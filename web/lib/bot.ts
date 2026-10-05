@@ -4,24 +4,28 @@ import type {Address} from "viem";
 /**
  * BOT Chain Bohr Testnet configuration for Mandate.
  *
- * This is the target network. The legacy Arc configuration still lives in `./arc` and is what the
- * current frontend build is wired to; switching the app onto this module happens together with the
- * Mandate ABI rollout so the two never disagree.
+ * This is the target network, and the only network configuration in the app. The legacy Arc setup
+ * was removed during the Mandate migration, so there is no second chain object that a caller could
+ * accidentally read balances from.
  */
 
 export const BOT_CHAIN_ID = 968;
+
+/** Resolved endpoints, exported so the settings page can display what the app is actually using. */
+export const BOT_RPC_URL = process.env.NEXT_PUBLIC_BOT_RPC_URL ?? "https://rpc.bohr.life";
+export const BOT_EXPLORER_URL = process.env.NEXT_PUBLIC_BOT_EXPLORER_URL ?? "https://scan.bohr.life";
 
 export const botChain = defineChain({
   id: BOT_CHAIN_ID,
   name: "BOT Bohr Testnet",
   nativeCurrency: {name: "tBOT", symbol: "tBOT", decimals: 18},
   rpcUrls: {
-    default: {http: [process.env.NEXT_PUBLIC_BOT_RPC_URL ?? "https://rpc.bohr.life"]},
+    default: {http: [BOT_RPC_URL]},
   },
   blockExplorers: {
     default: {
       name: "BohrScan",
-      url: process.env.NEXT_PUBLIC_BOT_EXPLORER_URL ?? "https://scan.bohr.life",
+      url: BOT_EXPLORER_URL,
     },
   },
   testnet: true,

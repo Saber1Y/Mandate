@@ -1,12 +1,12 @@
 import {http} from "wagmi";
 import {createConfig} from "@privy-io/wagmi";
-import {arcChain} from "./arc";
+import {botChain} from "./bot";
 
 /** wagmi config for Privy-synced wallets. @privy-io/wagmi registers the Privy
  *  connectors (embedded + external wallets) automatically; no manual connectors. */
 export const wagmiConfig = createConfig({
-  chains: [arcChain],
-  transports: {[arcChain.id]: http()},
+  chains: [botChain],
+  transports: {[botChain.id]: http()},
   ssr: true,
 });
 
