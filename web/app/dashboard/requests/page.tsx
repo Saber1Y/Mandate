@@ -16,32 +16,27 @@ import {explorerTx} from "@/lib/chain";
 import {useSpendHistory} from "@/lib/useChainRead";
 import {useActiveAddress} from "@/lib/usePrivyWallet";
 import {useRole} from "@/lib/useRole";
+import {requestStatusName} from "@/lib/contracts";
 import {useOwnerWrite} from "@/lib/useOwnerWrite";
 import {Panel, PanelNote} from "@/components/dashboard/Panel";
 import {TxChip, Chip} from "@/components/ui/Chip";
 import {Button} from "@/components/ui/Button";
 import {PageLoader} from "@/components/ui/PageLoader";
 
-/** Status index straight from MandateVault.RequestStatus. */
+/**
+ * Status indices come from `REQUEST_STATUS` in lib/contracts, which mirrors
+ * `MandateVault.RequestStatus` and is the single source of truth. A local copy of these indices
+ * previously drifted out of order and reported settled requests as rejected.
+ */
 const STATUS = {
   none: 0,
   pending: 1,
   approved: 2,
-  executed: 3,
-  rejected: 4,
-  expired: 5,
-  cancelled: 6,
+  rejected: 3,
+  executed: 4,
+  cancelled: 5,
+  expired: 6,
 } as const;
-
-const STATUS_LABEL: Record<number, string> = {
-  0: "Unknown",
-  1: "Pending",
-  2: "Approved",
-  3: "Executed",
-  4: "Rejected",
-  5: "Expired",
-  6: "Cancelled",
-};
 
 interface RequestRow {
   requestId: `0x${string}`;
@@ -284,7 +279,7 @@ function ClosedRow({request, onChanged}: {request: RequestRow; onChanged: () => 
           <span className="text-[13px] font-medium text-text-primary tabular-nums">
             {formatTusdt(request.amount)} tUSDT
           </span>
-          <Chip tone={executedNow ? "mint" : "blush"}>{STATUS_LABEL[request.status] ?? "Unknown"}</Chip>
+          <Chip tone={executedNow ? "mint" : "blush"}>{requestStatusName(request.status)}</Chip>
         </div>
         <div className="mt-0.5 text-[11px] text-text-muted">
           agent {truncateAddress(request.agent)} → {truncateAddress(request.target)}
