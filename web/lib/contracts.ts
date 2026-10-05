@@ -14,16 +14,20 @@ export {
 export {parseTusdt, formatTusdt} from "./format";
 
 /**
- * Minimal ERC-20 surface needed to read the treasury balance of the settlement token.
+ * Minimal ERC-20 surface needed to read the treasury balance of the settlement token, plus the
+ * approve/allowance pair the owner needs to fund the vault.
  *
- * There is deliberately no `approve` or `transfer` helper here. Mandate moves funds with
- * `safeTransfer` from vault-held balance, so the platform never needs an ERC-20 allowance from
- * the treasury - which means there is no allowance to leak, and no approve path to get wrong.
+ * There is deliberately no `transferFrom` helper. Mandate moves funds with `safeTransfer` from
+ * vault-held balance, so the platform never needs an ERC-20 allowance from the treasury - which
+ * means there is no allowance to leak. The allowance that does exist is the *owner's* allowance to
+ * the vault for the one-time `deposit`, and it is the owner who grants it, never the server.
  */
 export const erc20Abi = parseAbi([
   "function balanceOf(address) view returns (uint256)",
   "function decimals() view returns (uint8)",
   "function symbol() view returns (string)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+  "function approve(address spender, uint256 amount) returns (bool)",
 ]);
 
 /** Native asset sentinel used by MandateVault to represent the chain's native currency (tBOT). */

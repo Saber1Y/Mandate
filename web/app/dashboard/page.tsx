@@ -9,12 +9,13 @@ import {requestStatusName} from "@/lib/contracts";
 import {publicClient} from "@/lib/chain";
 import {isSameAddress, formatTusdt, truncateAddress, truncateHash, timeAgo} from "@/lib/format";
 import {explorerAddress, explorerTx} from "@/lib/chain";
-import {useTreasuryState, useSpendHistory, useAgentBudget} from "@/lib/useChainRead";
+import {useTreasuryState, useSpendHistory, useAgentBudget, useRejectedAttempts} from "@/lib/useChainRead";
 import {useActiveAddress, usePrivyWalletClient} from "@/lib/usePrivyWallet";
 import {useRole} from "@/lib/useRole";
 import {useVault} from "@/lib/useVault";
 import {useOwnerWrite} from "@/lib/useOwnerWrite";
 import {Panel, PanelNote} from "@/components/dashboard/Panel";
+import {FundVault, WithdrawVault} from "@/components/dashboard/FundVault";
 import {DailyCapMeter} from "@/components/dashboard/DailyCapMeter";
 import {Card} from "@/components/ui/Card";
 import {StatTile} from "@/components/ui/StatTile";
@@ -54,8 +55,13 @@ export default function DashboardPage() {
   const mine = useAgentBudget(vault, address);
 
   const pending = usePendingRequests(vault);
+  const attempts = useRejectedAttempts(25);
   const settled = useMemo(
     () => (history.data ?? []).filter((e) => e.kind === "executed").slice(0, 6),
+    [history.data],
+  );
+  const approvedCount = useMemo(
+    () => (history.data ?? []).filter((e) => e.kind === "executed").length,
     [history.data],
   );
 
@@ -100,19 +106,63 @@ export default function DashboardPage() {
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
         <Card tone="paper" pad="md">
           <StatTile
-            label="Treasury balance"
-            value={formatTusdt(t.treasuryBalance)}
-            sub={<span className="text-text-muted">tUSDT held by the vault</span>}
+            label="Total controlled"
+            value={`$${formatTusdt(t.treasuryBalance)}`}
+            sub={<span className="text-text-muted">tUSDT in the vault</span>}
           />
         </Card>
         <Card tone="paper" pad="md">
-          <StatTile label="Settlement token" value={<span className="text-[15px]">tUSDT</span>} sub={<CopyChip value={TUSDT_ADDRESS} label={truncateAddress(TUSDT_ADDRESS)} />} />
+          <StatTile
+            label="Spent today"
+            value={`$${formatTusdt(mine.data?.policy.spentToday ?? 0n)}`}
+            sub={
+              <span className="text-text-muted">
+                {mine.data ? `of $${formatTusdt(mine.data.policy.dailyCap)} daily cap` : "for your address"}
+              </span>
+            }
+          />
         </Card>
         <Card tone="paper" pad="md">
           <StatTile
-            label="Pending approvals"
+            label="Remaining today"
+            value={`$${formatTusdt(mine.data?.remainingDailyCap ?? 0n)}`}
+            sub={<span className="text-text-muted">your address&rsquo;s headroom</span>}
+          />
+        </Card>
+        <Card tone="paper" pad="md">
+          <StatTile
+            label="Approved"
+            value={approvedCount}
+            sub={<span className="text-text-muted">settlements on chain</span>}
+          />
+        </Card>
+        <Card tone="paper" pad="md">
+          <StatTile
+            label="Blocked"
+            value={attempts.data?.length ?? "-"}
+            sub={
+              <span className="text-text-muted">
+                {attempts.data?.length ? "policy rejections" : "recorded rejections"}
+              </span>
+            }
+          />
+        </Card>
+        <Card tone="paper" pad="md">
+          <StatTile
+            label="Awaiting approval"
             value={pending.data?.length ?? "-"}
-            sub={<span className="text-text-muted">{pending.data?.length ? "needs an approver" : "queue is clear"}</span>}
+            sub={
+              <span className="text-text-muted">
+                {pending.data?.length ? "needs an approver" : "queue is clear"}
+              </span>
+            }
+          />
+        </Card>
+        <Card tone="paper" pad="md">
+          <StatTile
+            label="Settlement token"
+            value={<span className="text-[15px]">tUSDT</span>}
+            sub={<CopyChip value={TUSDT_ADDRESS} label={truncateAddress(TUSDT_ADDRESS)} />}
           />
         </Card>
         <Card tone="paper" pad="md">
@@ -128,6 +178,18 @@ export default function DashboardPage() {
             sub={<span className="text-text-muted">owner controls pause</span>}
           />
         </Card>
+      </div>
+
+      {/* Funding comes before anything else an operator does: an empty vault cannot spend. */}
+      <div className="mt-4">
+        <FundVault
+          vault={vault!}
+          vaultBalance={t.treasuryBalance}
+          onChanged={treasury.refetch}
+        />
+        <Panel title="Treasury exit" subtitle="Owner authority" className="mt-4">
+          <WithdrawVault vault={vault!} balance={t.treasuryBalance} isOwner={isOwner} />
+        </Panel>
       </div>
 
       <div className="mt-4">
@@ -242,14 +304,17 @@ export default function DashboardPage() {
           )}
         </Panel>
 
-        <Panel title="Recent settlements" subtitle="RequestExecuted events, newest first">
-          {history.loading ? (
+        <Panel title="Recent decisions" subtitle="Settled on chain, and refused by policy">
+          {history.loading || attempts.loading ? (
             <div className="space-y-2">
               <Skeleton className="h-12 w-full" />
               <Skeleton className="h-12 w-full" />
             </div>
-          ) : settled.length === 0 ? (
-            <PanelNote>No spend has settled yet.</PanelNote>
+          ) : settled.length === 0 && (attempts.data?.length ?? 0) === 0 ? (
+            <PanelNote>
+              Nothing yet. A settled spend appears here from the chain; a refused one appears with the
+              reason the vault gave.
+            </PanelNote>
           ) : (
             <div className="space-y-2">
               {settled.map((e) => (
@@ -262,7 +327,29 @@ export default function DashboardPage() {
                       to {truncateAddress(e.target)}
                     </div>
                   </div>
-                  <TxChip href={explorerTx(e.txHash)} label={truncateHash(e.txHash)} tone="mint" />
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-medium text-state-approved">Approved</span>
+                    <TxChip href={explorerTx(e.txHash)} label={truncateHash(e.txHash)} tone="mint" />
+                  </div>
+                </div>
+              ))}
+              {(attempts.data ?? []).slice(0, 8).map((a) => (
+                <div
+                  key={a.id}
+                  className="flex items-start justify-between gap-3 rounded-lg border border-state-blocked/25 bg-white px-4 py-3"
+                >
+                  <div className="min-w-0">
+                    <div className="text-[13px] font-medium text-text-primary tabular-nums">
+                      {formatTusdt(BigInt(a.amount))} tUSDT
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-text-muted">
+                      to {truncateAddress(a.recipient)} &middot; {a.detail}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <span className="text-[11px] font-medium text-state-blocked">Blocked</span>
+                    <span className="font-mono text-[10px] text-text-muted">{a.reason}</span>
+                  </div>
                 </div>
               ))}
             </div>
