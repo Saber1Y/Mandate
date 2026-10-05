@@ -29,8 +29,12 @@ This document states the guarantees, the deliberate tradeoffs, and the known lim
 
 ## Reverts, not silent failures
 
-Policy violations **revert with a named custom error** (`InvalidPolicy`, `NotAuthorized`,
-`TokenNotAllowed`, `RequestNotApproved`, `RequestFinalized`, `IdempotencyConflict`, `DeadlinePassed`).
+Policy violations **revert with a named custom error** (`ZeroAmount`, `NotRegistered`,
+`InvalidPolicy`, `NotAuthorized`, `RequestNotApproved`, `RequestFinalized`,
+`IdempotencyConflict`, `DeadlinePassed`).
+A disallowed token and an unallowlisted recipient share `NotAuthorized`, since both answer the same
+question: is this agent permitted to move value here at all. Anything bounded by a limit - per-tx
+cap, daily cap, expiry - is `InvalidPolicy`.
 This differs from a log-and-return-false design, and it is deliberate here: the request lifecycle has
 explicit terminal states, so a rejected request is an error the caller must handle, not a value to
 inspect.

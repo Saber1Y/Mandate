@@ -127,7 +127,7 @@ request reverts `RequestNotPending`.
 
 | Route | Auth | Purpose |
 |-------|------|---------|
-| `GET /api/health` | none | Liveness, deployed vault/factory, relayer configured |
+| `GET /api/health` | none | Liveness, factory deployment and vault count, relayer configured |
 | `GET /api/agents/me` | agent bearer | Live agent projection: on-chain policy, balances, remaining cap |
 | `POST /api/requests` | agent bearer | Relay `requestSpend` for the authenticated agent |
 | `GET /api/requests/{id}` | agent bearer | Agent-scoped request read |
@@ -137,8 +137,24 @@ request reverts `RequestNotPending`.
 The agent address always comes from the authenticated credential, never from the request body.
 Credential mutations require an EIP-191 signature from the live on-chain vault owner over a canonical
 payload binding action, agent id, agent address, chain, vault, timestamp and nonce.
-The server verifies the signature, confirms the agent is registered on-chain, and burns the nonce so
-a captured signature cannot be replayed.
+The server recovers the signer and then requires `factory.vaultOf(signer) == signedVault`,
+`vault.owner() == signer`, and a registered agent. Authority therefore comes from the signature
+itself, resolved against the chain, rather than from a server-side list of who may issue keys. The
+nonce is then burned so a captured signature cannot be replayed.
+
+## Multi-tenancy
+
+Each organization gets exactly one vault, created by `MandateVaultFactory.createVault` and
+irreversibly owned by the caller. There is no deployment-wide vault any more: the client resolves
+`vaultOf(connectedAddress)`, treats the zero address as "no treasury yet", and the server takes the
+vault from the authenticated credential rather than from configuration.
+
+A credential is bound to one vault at issue time, and its uniqueness is per `(vault, agent_address)`
+rather than per address, so two unrelated organizations can use the same agent address without
+colliding. Every route, read, and role check is scoped by that vault.
+
+`MANDATE_VAULT_ADDRESS` exists only to backfill credential rows created before this change. It is
+server-side, is not a fallback, and is never read as a current vault.
 
 ## Read path
 

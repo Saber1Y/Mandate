@@ -158,7 +158,7 @@ export async function readRequest(vault: Address, requestId: Hex) {
 
 /**
  * MandateVault.getRequest returns exactly these fields. Note there is no `executedAt`: settlement
- * time is the `SpendExecuted` event, so do not invent the field here.
+ * time is the `RequestExecuted` event, so do not invent the field here.
  */
 export interface MandateRequest {
   agent: Address;
