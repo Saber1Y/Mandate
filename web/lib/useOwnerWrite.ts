@@ -2,7 +2,7 @@
 
 import {useState} from "react";
 import type {Abi} from "viem";
-import {arcChain} from "./arc";
+import {botChain} from "./bot";
 import {usePrivyWalletClient} from "./usePrivyWallet";
 import {waitForReceiptRaw} from "./txwait";
 
@@ -18,6 +18,9 @@ export type WriteStatus = {pending: boolean; error?: string; okKey?: number};
 /**
  * Owner write with the backend confirmation pattern: submit → wait for raw receipt → READ BACK
  * (caller's refetch) to confirm the effect. Never uses a formatted waitForTransactionReceipt.
+ *
+ * `run` resolves to whether the transaction actually succeeded, because callers must not present
+ * success for a write that reverted or never landed.
  */
 export function useOwnerWrite(refetch: () => void) {
   const {getClient} = usePrivyWalletClient();
@@ -30,19 +33,21 @@ export function useOwnerWrite(refetch: () => void) {
       if (!client) throw new Error("No wallet connected");
       const hash = await client.writeContract({
         ...args,
-        chain: arcChain,
+        chain: botChain,
         account: client.account!,
       });
       const result = await waitForReceiptRaw(hash);
       if (result === "reverted") {
         setStatus({pending: false, error: "Transaction reverted on-chain"});
-        return;
+        return false;
       }
       refetch(); // read-back the resulting state
       setStatus({pending: false, okKey: Date.now()});
+      return true;
     } catch (e) {
       const err = e as {shortMessage?: string; message?: string};
       setStatus({pending: false, error: err.shortMessage ?? err.message ?? "Transaction failed"});
+      return false;
     }
   };
 

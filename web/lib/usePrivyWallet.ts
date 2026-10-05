@@ -3,7 +3,7 @@
 import {useCallback} from "react";
 import {usePrivy, useWallets} from "@privy-io/react-auth";
 import {createWalletClient, custom, type Address, type WalletClient} from "viem";
-import {arcChain} from "./arc";
+import {botChain} from "./bot";
 import {publicClient} from "./chain";
 
 /**
@@ -31,13 +31,13 @@ export function usePrivyWalletClient() {
 
   const getClient = useCallback(async (): Promise<WalletClient | null> => {
     if (!connected || !wallet) return null;
-    if (String(wallet.chainId) !== String(arcChain.id)) {
-      await wallet.switchChain(arcChain.id);
+    if (String(wallet.chainId) !== String(botChain.id)) {
+      await wallet.switchChain(botChain.id);
     }
     const provider = await wallet.getEthereumProvider();
     return createWalletClient({
       account: wallet.address as Address,
-      chain: arcChain,
+      chain: botChain,
       transport: custom(provider),
     });
   }, [connected, wallet]);
@@ -45,7 +45,28 @@ export function usePrivyWalletClient() {
   return {getClient, address: wallet?.address as Address | undefined, hasWallet: connected};
 }
 
-/** Wait for an on-chain receipt via the Arc public client. */
+/**
+ * EIP-191 message signing from the connected Privy wallet.
+ *
+ * Used for credential issuance, where the server must verify that the organization owner approved a
+ * specific agent before it will mint an API key. Separate from `useOwnerWrite` on purpose: a signed
+ * message authorizes, it does not move funds and must never be described as a transaction.
+ */
+export function useWalletMessageSigner() {
+  const {getClient} = usePrivyWalletClient();
+  const signMessage = useCallback(
+    async (message: string): Promise<`0x${string}`> => {
+      const client = await getClient();
+      if (!client) throw new Error("No wallet connected");
+      if (!client.account) throw new Error("Wallet has no account to sign with");
+      return client.signMessage({message, account: client.account});
+    },
+    [getClient],
+  );
+  return {signMessage};
+}
+
+/** Wait for an on-chain receipt via the BOT Chain public client. */
 export async function waitForReceipt(hash: `0x${string}`) {
   return publicClient.waitForTransactionReceipt({hash});
 }

@@ -1,49 +1,101 @@
 "use client";
 
-import {createContext, useContext} from "react";
+import {createContext, useContext, useEffect, useState} from "react";
 import {useActiveAddress} from "./usePrivyWallet";
-import {useVaultState, useApiAgents} from "./hooks";
 import {isSameAddress, type Address} from "./format";
-import {CONTRACTS} from "./contracts";
-
-/** Demo agent (also the vault owner) - used as the read anchor for owner() + policy reads. */
-const ROLE_ANCHOR = "0x3F5b96A494061F7338Da529e3047809Ac6a7FB84" as Address;
+import {mandateContracts, MissingMandateConfigError} from "./bot";
+import {publicClient} from "./chain";
+import {mandateVaultAbi} from "./abi/mandate";
 
 export interface RoleValue {
   isOwner: boolean;
+  isApprover: boolean;
   isConnected: boolean;
   address?: Address;
+  vaultOwner?: Address;
   loading: boolean;
+  error?: string;
 }
 
-/**
- * Dashboard role, resolved ONCE at the layout and shared with every page.
- * Previously each page called useVaultState(ROLE_ANCHOR) again, so a single
- * navigation did the full on-chain read twice (layout + page) and users sat
- * on "Resolving role..." twice. The provider guarantees one read total.
- *
- * The vault owner sees the full operator control plane. Everyone else is a
- * booth visitor and sees only their own agent.
- */
-const RoleContext = createContext<RoleValue>({isOwner: false, isConnected: false, loading: true});
+const RoleContext = createContext<RoleValue>({isOwner: false, isApprover: false, isConnected: false, loading: true});
 
+/**
+ * Owner and approver status, resolved once at the layout and shared with every page.
+ *
+ * Both answers come from the vault itself rather than a server response. That matters: a role shown
+ * by this UI is only ever advisory, but it must at minimum agree with what the contract enforces,
+ * or the operator gets confused about why a transaction reverts.
+ */
 export function RoleProvider({children}: {children: React.ReactNode}) {
   const {address, isConnected} = useActiveAddress();
-  const {data: state, loading} = useVaultState(ROLE_ANCHOR, CONTRACTS.vault);
-  const isOwner = isConnected && !!state && isSameAddress(address, state.vaultOwner);
-  return (
-    <RoleContext.Provider value={{isOwner, isConnected, address, loading}}>{children}</RoleContext.Provider>
-  );
+  const [vaultOwner, setVaultOwner] = useState<Address | undefined>();
+  const [approver, setApprover] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | undefined>();
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function resolve() {
+      setLoading(true);
+      setError(undefined);
+      try {
+        const {vault} = mandateContracts();
+        const owner = await publicClient.readContract({
+          address: vault,
+          abi: mandateVaultAbi,
+          functionName: "owner",
+        });
+
+        // Approver status is only meaningful for a registered, connected address.
+        let isApprover = false;
+        if (address) {
+          try {
+            isApprover = await publicClient.readContract({
+              address: vault,
+              abi: mandateVaultAbi,
+              functionName: "approvers",
+              args: [address],
+            });
+          } catch {
+            isApprover = false;
+          }
+        }
+
+        if (cancelled) return;
+        setVaultOwner(owner as Address);
+        setApprover(Boolean(isApprover));
+      } catch (e) {
+        if (cancelled) return;
+        setError(
+          e instanceof MissingMandateConfigError
+            ? e.message
+            : "Could not read the vault owner from BOT Chain.",
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    void resolve();
+    return () => {
+      cancelled = true;
+    };
+  }, [address]);
+
+  const value: RoleValue = {
+    isOwner: isConnected && !!vaultOwner && isSameAddress(address, vaultOwner),
+    isApprover: isConnected && (!!vaultOwner && isSameAddress(address, vaultOwner) || approver),
+    isConnected,
+    address,
+    vaultOwner,
+    loading,
+    error,
+  };
+
+  return <RoleContext.Provider value={value}>{children}</RoleContext.Provider>;
 }
 
 export function useRole() {
   return useContext(RoleContext);
-}
-
-/** The registered agent belonging to the connected wallet (visitor scope). */
-export function useMyAgent() {
-  const {address, isConnected} = useActiveAddress();
-  const {agents, loading} = useApiAgents();
-  const agent = isConnected && address ? (agents.find((a) => isSameAddress(a.address, address)) ?? null) : null;
-  return {agent, loading, isConnected, address};
 }
