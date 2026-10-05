@@ -2,7 +2,7 @@ import {NextResponse} from "next/server";
 import {type Address, type Hex, isAddress} from "viem";
 import {authenticateAgent, AuthenticationError} from "@/lib/auth";
 import {findCredentialByHash, touchCredential} from "@/lib/agents";
-import {TUSDT_ADDRESS, mandateContracts} from "@/lib/bot";
+import {TUSDT_ADDRESS} from "@/lib/bot";
 import {publicClient} from "@/lib/chain";
 import {mandateVaultAbi} from "@/lib/abi/mandate";
 import {isBytes32, requestStatusName} from "@/lib/contracts";
@@ -99,13 +99,24 @@ export async function POST(request: Request) {
     return NextResponse.json({error: (e as Error).message}, {status: 400});
   }
 
+  // Scope comes from the credential. A key is bound to one vault at issue time, so this cannot be
+  // redirected at another org's treasury by anything in the request body.
+  const vault = credential.vault;
+  if (!vault) {
+    return NextResponse.json(
+      {error: "This credential is not scoped to a vault. Rotate the key to re-issue it."},
+      {status: 409},
+    );
+  }
+
   try {
-    await assertExecutorRegistered();
+    await assertExecutorRegistered(vault);
   } catch (e) {
     return NextResponse.json({error: (e as Error).message}, {status: 503});
   }
 
   const result = await relayRequestSpend({
+    vault,
     agent: credential.agentAddress,
     token,
     recipient: body.recipient as Address,
@@ -123,9 +134,8 @@ export async function POST(request: Request) {
     );
   }
 
-  const {vault} = mandateContracts();
   const requestId = await deriveRequestId(vault, idempotencyKey);
-  const onChain = requestId ? await readRequest(requestId) : null;
+  const onChain = requestId ? await readRequest(vault, requestId) : null;
 
   return NextResponse.json(
     {

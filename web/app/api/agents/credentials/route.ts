@@ -34,7 +34,7 @@ export async function POST(request: Request) {
     );
   }
 
-  let identity: {agentId: string; agentAddress: `0x${string}`; nonceHash: string};
+  let identity: {agentId: string; agentAddress: `0x${string}`; vault: `0x${string}`; nonceHash: string};
   try {
     identity = await verifyCredentialAuthorization({
       authorization: body.authorization,
@@ -59,20 +59,31 @@ export async function POST(request: Request) {
 
   try {
     if (action === "revoke") {
-      const revoked = await revokeAgentKeys(identity.agentId);
-      return NextResponse.json({ok: true, action, agentId: identity.agentId, revoked});
+      const revoked = await revokeAgentKeys({agentId: identity.agentId, vault: identity.vault});
+      return NextResponse.json({
+        ok: true,
+        action,
+        agentId: identity.agentId,
+        vault: identity.vault,
+        revoked,
+      });
     }
 
     const {plaintext, credential} =
       action === "issue"
-        ? await issueAgentKey({agentId: identity.agentId, agentAddress: identity.agentAddress})
-        : await rotateAgentKeys(identity.agentId);
+        ? await issueAgentKey({
+            agentId: identity.agentId,
+            agentAddress: identity.agentAddress,
+            vault: identity.vault,
+          })
+        : await rotateAgentKeys({agentId: identity.agentId, vault: identity.vault});
 
     return NextResponse.json({
       ok: true,
       action,
       agentId: credential.agentId,
       agentAddress: credential.agentAddress,
+      vault: credential.vault,
       keyHint: credential.keyHint,
       createdAt: credential.createdAt,
       // Shown once. Storing it anywhere would make revocation meaningless.
@@ -81,6 +92,8 @@ export async function POST(request: Request) {
     });
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    return NextResponse.json({error: message.slice(0, 300)}, {status: 500});
+    // A duplicate live key is a client mistake (rotate or revoke first), not a server fault.
+    const status = message.includes("already has an active key") ? 409 : 500;
+    return NextResponse.json({error: message.slice(0, 300)}, {status});
   }
 }

@@ -32,7 +32,16 @@ export async function POST(request: Request, context: {params: Promise<{id: stri
   }
   touchCredential(credential.keyHash);
 
-  const before = await readRequest(requestId);
+  // Vault comes from the credential; there is no deployment-wide default to fall back to.
+  const vault = credential.vault;
+  if (!vault) {
+    return NextResponse.json(
+      {error: "This credential is not scoped to a vault. Rotate the key to re-issue it."},
+      {status: 409},
+    );
+  }
+
+  const before = await readRequest(vault, requestId);
   if (!before) {
     return NextResponse.json({error: "Unknown request id."}, {status: 404});
   }
@@ -40,7 +49,7 @@ export async function POST(request: Request, context: {params: Promise<{id: stri
     return NextResponse.json({error: "Request does not belong to this agent."}, {status: 403});
   }
 
-  const result = await relayExecute(requestId);
+  const result = await relayExecute(vault, requestId);
   if (!result.success) {
     const status = result.reason ? 422 : 502;
     return NextResponse.json(
@@ -49,7 +58,7 @@ export async function POST(request: Request, context: {params: Promise<{id: stri
     );
   }
 
-  const after = await readRequest(requestId);
+  const after = await readRequest(vault, requestId);
   return NextResponse.json({
     requestId,
     executeTxHash: result.txHash,

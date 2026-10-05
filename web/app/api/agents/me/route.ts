@@ -1,7 +1,7 @@
 import {NextResponse} from "next/server";
 import {authenticateAgent, AuthenticationError} from "@/lib/auth";
 import {findCredentialByHash, touchCredential} from "@/lib/agents";
-import {TUSDT_ADDRESS, botChain, mandateContracts} from "@/lib/bot";
+import {TUSDT_ADDRESS, botChain} from "@/lib/bot";
 import {publicClient} from "@/lib/chain";
 import {mandateVaultAbi} from "@/lib/abi/mandate";
 import {erc20Abi} from "@/lib/contracts";
@@ -28,11 +28,14 @@ export async function GET(request: Request) {
   }
   touchCredential(credential.keyHash);
 
-  let vault: `0x${string}`;
-  try {
-    vault = mandateContracts().vault;
-  } catch (e) {
-    return NextResponse.json({error: (e as Error).message}, {status: 503});
+  // The vault comes from the credential, never from a deployment-wide setting. This is what scopes
+  // a key to exactly one treasury: a key issued by org A cannot read org B's policy.
+  const vault = credential.vault;
+  if (!vault) {
+    return NextResponse.json(
+      {error: "This credential is not scoped to a vault. Rotate the key to re-issue it."},
+      {status: 409},
+    );
   }
 
   const agent = credential.agentAddress;

@@ -27,7 +27,8 @@ export async function GET(request: Request, context: {params: Promise<{id: strin
   }
   touchCredential(credential.keyHash);
 
-  const onChain = await readRequest(id.toLowerCase() as Hex);
+  // Read from the credential's vault, so an id from another org's treasury is simply unknown here.
+  const onChain = await readRequest(credential.vault, id.toLowerCase() as Hex);
   if (!onChain) return NextResponse.json({error: "Unknown request id."}, {status: 404});
   if (onChain.agent.toLowerCase() !== credential.agentAddress.toLowerCase()) {
     return NextResponse.json({error: "Request does not belong to this agent."}, {status: 403});
