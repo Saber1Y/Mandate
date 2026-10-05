@@ -22,6 +22,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const BYTES32 = "0x" + "11".repeat(32);
 
+/** Must be allowlisted for the over-cap check to reach the cap check at all. See runPolicy(). */
+const OVER_CAP_RECIPIENT = "0x2222222222222222222222222222222222222222";
+/** Deliberately never allowlisted, so the authorization fence is what rejects it. */
+const NOT_ALLOWLISTED_RECIPIENT = "0x3333333333333333333333333333333333333333";
+
 function parseArgs(argv) {
   const args = {apiKey: null, base: null, dryRun: false, settle: false};
   for (let i = 0; i < argv.length; i++) {
@@ -145,20 +150,31 @@ async function runValidation(base, key) {
 async function runPolicy(base, key) {
   section("on-chain policy");
 
+  // Precondition: both checks below pay a recipient, and MandateVault._validate tests the recipient
+  // allowlist BEFORE any cap. So recipient 0x2222...2222 must be allowlisted for this agent, or the
+  // over-cap case reports NotAuthorized and proves nothing about caps.
+  //
+  //   cast send <vault> "setAllowedService(address,address,string,uint256,uint256,uint64,bool)" \
+  //     <agent> 0x2222222222222222222222222222222222222222 "qa" 0 0 0 true
+  //
+  // Remove it afterwards to leave the treasury as it was found.
+
   // Far beyond any sane per-transaction cap. The vault must reject it, not the server.
   const overCap = await api(base, "/api/requests", {
     method: "POST",
     auth: key,
     body: {
       amount: "100000000000000000000000000000000000",
-      recipient: "0x2222222222222222222222222222222222222222",
+      recipient: OVER_CAP_RECIPIENT,
       idempotencyKey: "0x" + "22".repeat(32),
     },
   });
   check(
     "over the per-transaction cap reverts on-chain",
     overCap.status === 422 && overCap.body?.reason === "InvalidPolicy",
-    `status ${overCap.status} reason ${overCap.body?.reason}`,
+    overCap.body?.reason === "NotAuthorized"
+      ? `status ${overCap.status} reason NotAuthorized - ${OVER_CAP_RECIPIENT} is not allowlisted for this agent, so the allowlist is checked before the cap. Grant the fixture, see runPolicy().`
+      : `status ${overCap.status} reason ${overCap.body?.reason}`,
   );
 
   // A recipient the operator has not allowlisted must fail closed.
@@ -167,7 +183,7 @@ async function runPolicy(base, key) {
     auth: key,
     body: {
       amount: "1000",
-      recipient: "0x3333333333333333333333333333333333333333",
+      recipient: NOT_ALLOWLISTED_RECIPIENT,
       idempotencyKey: "0x" + "33".repeat(32),
     },
   });

@@ -121,7 +121,32 @@ organization wallet connected through Privy.
 ```bash
 # Live API QA - run the real request/auth/policy suite against a running server
 cd web && node scripts/qa-agent.mjs --api-key mdt_...
+
+# MCP conformance - protocol layer, no money and no running dashboard needed
+cd web && npm run mcp:check
 ```
+
+## Giving an agent the keys
+
+An agent can spend as a native tool over MCP rather than hand-rolling HTTP calls. Point any MCP
+client at the server with one agent key:
+
+```json
+{
+  "mcpServers": {
+    "mandate": {
+      "command": "node",
+      "args": ["/path/to/Mandate/web/mcp/server.mjs"],
+      "env": {"MANDATE_API_KEY": "mdt_...", "MANDATE_API_BASE": "http://localhost:3000"}
+    }
+  }
+}
+```
+
+Six tools: `get_budget`, `check_spend` (dry run), `request_payment`, `settle_payment`, `get_request`,
+`list_rejections`. A payment the vault refuses comes back as data with the reason and an instruction
+not to work around it, rather than as an error the model retries. See
+**[web/mcp/README.md](./web/mcp/README.md)**.
 
 ## Documentation
 
