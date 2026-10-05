@@ -2,11 +2,18 @@
 
 import {useCallback, useEffect, useState} from "react";
 import {TUSDT_ADDRESS} from "@/lib/bot";
-import {bytesToHex, type Address} from "viem";
+import {bytesToHex, isAddress, type Address} from "viem";
 import {mandateVaultAbi} from "@/lib/abi/mandate";
 import {parseTusdt} from "@/lib/contracts";
-import {isSameAddress, truncateAddress, formatExpiry} from "@/lib/format";
+import {
+  isSameAddress,
+  truncateAddress,
+  formatExpiry,
+  formatTusdt,
+  tryParseTusdt,
+} from "@/lib/format";
 import {explorerAddress, publicClient} from "@/lib/chain";
+import {readServiceAllowlist, type ServiceAllowlistEntry} from "@/lib/reads";
 import {useTreasuryState} from "@/lib/useChainRead";
 import {useOwnerWrite} from "@/lib/useOwnerWrite";
 import {useWalletMessageSigner} from "@/lib/usePrivyWallet";
@@ -287,6 +294,186 @@ function AgentEditor({vault, agent, onChanged}: {vault: Address; agent: `0x${str
         </Button>
         {setToken.error ? <span className="text-[12px] text-state-blocked">{setToken.error}</span> : null}
       </div>
+
+      <RecipientAllowlist vault={vault} agent={agent} onChanged={onChanged} />
+    </div>
+  );
+}
+
+/**
+ * Recipients this agent may pay.
+ *
+ * Without an entry here every request from the agent reverts `NotAuthorized`, so this is the step
+ * that actually unlocks spending. A recipient entry can also be tighter than the agent's own policy,
+ * which is the reason to use it instead of relying on the global cap alone.
+ *
+ * Caps are optional: `maxPerTx == 0` means this recipient is bounded only by the agent's policy, and
+ * `dailyCap == 0` means the recipient has no daily ceiling of its own.
+ */
+function RecipientAllowlist({
+  vault,
+  agent,
+  onChanged,
+}: {
+  vault: Address;
+  agent: `0x${string}`;
+  onChanged: () => void;
+}) {
+  const [entries, setEntries] = useState<ServiceAllowlistEntry[] | undefined>();
+  const [loadError, setLoadError] = useState<string | undefined>();
+  const [target, setTarget] = useState("");
+  const [label, setLabel] = useState("");
+  const [maxPerTx, setMaxPerTx] = useState("");
+  const [dailyCap, setDailyCap] = useState("");
+  const [expiryDays, setExpiryDays] = useState("0");
+
+  const load = useCallback(async () => {
+    try {
+      setEntries(await readServiceAllowlist({vault, agent}));
+      setLoadError(undefined);
+    } catch (e) {
+      setLoadError(e instanceof Error ? e.message : "Could not read the recipient allowlist.");
+    }
+  }, [vault, agent]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = useOwnerWrite(() => {
+    void load();
+    onChanged();
+  });
+  const remove = useOwnerWrite(() => {
+    void load();
+    onChanged();
+  });
+
+  const trimmed = target.trim();
+  const maxTxBase = maxPerTx.trim() === "" ? 0n : tryParseTusdt(maxPerTx);
+  const capBase = dailyCap.trim() === "" ? 0n : tryParseTusdt(dailyCap);
+  const days = Number(expiryDays) || 0;
+
+  const error = !isAddress(trimmed)
+    ? "Enter the address the agent may pay."
+    : maxTxBase === null
+      ? "Max per transaction must be a valid tUSDT amount."
+      : capBase === null
+        ? "Daily cap must be a valid tUSDT amount."
+        : maxTxBase > 0n && capBase > 0n && maxTxBase > capBase
+          ? "Max per transaction cannot exceed the daily cap."
+          : days < 0 || !Number.isFinite(days)
+            ? "Expiry cannot be negative."
+            : undefined;
+
+  const expiryTs = days > 0 ? BigInt(Math.floor(Date.now() / 1000) + days * 86_400) : 0n;
+
+  return (
+    <div className="mt-5 space-y-4 border-t border-border pt-5">
+      <div className="flex flex-wrap items-baseline justify-between gap-2">
+        <h3 className="text-[13px] font-semibold text-text-primary">Recipients this agent may pay</h3>
+        <span className="text-[11px] text-text-muted">
+          A request to an address that is not listed here reverts on-chain.
+        </span>
+      </div>
+
+      {entries && entries.length > 0 ? (
+        <ul className="space-y-2">
+          {entries.map((entry) => (
+            <li
+              key={entry.target}
+              className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border px-3 py-2"
+            >
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-[12px] text-text-primary">
+                    {truncateAddress(entry.target)}
+                  </span>
+                  <Chip tone={entry.allowed ? "mint" : "blush"}>{entry.allowed ? "allowed" : "removed"}</Chip>
+                </div>
+                <div className="mt-0.5 text-[11px] text-text-muted">
+                  {entry.label || "no label"}
+                  {" · "}
+                  {entry.maxPerTx > 0n
+                    ? `max ${formatTusdt(entry.maxPerTx)} tUSDT`
+                    : "no per-tx cap of its own"}
+                  {entry.dailyCap > 0n ? ` · daily ${formatTusdt(entry.dailyCap)}` : ""}
+                  {entry.expiry > 0n
+                    ? ` · ${formatExpiry(entry.expiry).label}`
+                    : " · never expires"}
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="secondary"
+                disabled={remove.pending}
+                onClick={() =>
+                  remove.run({
+                    address: vault,
+                    abi: mandateVaultAbi,
+                    functionName: "setAllowedService",
+                    args: [agent, entry.target, "", 0n, 0n, 0n, !entry.allowed],
+                  })
+                }
+              >
+                {entry.allowed ? "Remove" : "Re-allow"}
+              </Button>
+            </li>
+          ))}
+        </ul>
+      ) : loadError ? (
+        <PanelNote tone="error">{loadError}</PanelNote>
+      ) : (
+        <PanelNote>
+          No recipients listed. Until at least one is allowed, this agent can authenticate but every
+          spend it requests will be rejected by the vault.
+        </PanelNote>
+      )}
+
+      <form
+        className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (error) return;
+          void save.run({
+            address: vault,
+            abi: mandateVaultAbi,
+            functionName: "setAllowedService",
+            args: [agent, trimmed as Address, label.trim(), maxTxBase ?? 0n, capBase ?? 0n, expiryTs, true],
+          });
+        }}
+      >
+        <Field label="Recipient">
+          <TextInput
+            value={target}
+            onChange={(e) => setTarget(e.target.value)}
+            placeholder="0x..."
+            spellCheck={false}
+            className="font-mono"
+          />
+        </Field>
+        <Field label="Label" hint="Shown in this list only.">
+          <TextInput value={label} onChange={(e) => setLabel(e.target.value)} placeholder="model-api" />
+        </Field>
+        <Field label="Max per tx (tUSDT)" hint="0 = agent policy only">
+          <TextInput value={maxPerTx} onChange={(e) => setMaxPerTx(e.target.value)} inputMode="decimal" />
+        </Field>
+        <Field label="Daily cap (tUSDT)" hint="0 = none">
+          <TextInput value={dailyCap} onChange={(e) => setDailyCap(e.target.value)} inputMode="decimal" />
+        </Field>
+        <Field label="Expiry (days, 0 = never)">
+          <TextInput value={expiryDays} onChange={(e) => setExpiryDays(e.target.value)} inputMode="numeric" />
+        </Field>
+
+        <div className="flex items-center gap-3 xl:col-span-5">
+          <Button type="submit" disabled={!!error || save.pending}>
+            {save.pending ? "Confirming..." : "Allow recipient"}
+          </Button>
+          {error ? <span className="text-[12px] text-state-blocked">{error}</span> : null}
+          {save.error ? <span className="text-[12px] text-state-blocked">{save.error}</span> : null}
+          {remove.error ? <span className="text-[12px] text-state-blocked">{remove.error}</span> : null}
+        </div>
+      </form>
     </div>
   );
 }
@@ -382,9 +569,17 @@ function ExecutorManager({vault, onChanged, disabled}: {vault: Address; onChange
 function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0x${string}`; disabled: boolean}) {
   const {signMessage} = useWalletMessageSigner();
   const [agentId, setAgentId] = useState("");
+  // Holds its own address rather than depending on the lookup above. Requiring a separate Look up
+  // first was a silent dead end: the form rendered disabled with the reason only on submit.
+  const [agentAddress, setAgentAddress] = useState(agent ?? "");
   const [busy, setBusy] = useState<CredentialAction | null>(null);
   const [error, setError] = useState<string | undefined>();
   const [issued, setIssued] = useState<{apiKey: string; keyHint: string} | null>(null);
+
+  // Follow the lookup when it changes, but never overwrite an address the operator typed here.
+  useEffect(() => {
+    if (agent) setAgentAddress(agent);
+  }, [agent]);
 
   const run = async (action: CredentialAction) => {
     setError(undefined);
@@ -395,8 +590,9 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
       setError("agentId must be 2-64 characters of a-z, 0-9, underscore or dash.");
       return;
     }
-    if (!agent) {
-      setError("Look up the agent address above first. The signature must bind to a registered agent.");
+    const target = agentAddress.trim();
+    if (!isAddress(target)) {
+      setError("Enter the agent address this key belongs to.");
       return;
     }
 
@@ -405,7 +601,7 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
       const authorization = {
         action,
         agentId: id,
-        agentAddress: agent,
+        agentAddress: target as Address,
         // Signed explicitly so the server can confirm the signer really owns this treasury. See
         // verifyCredentialAuthorization: it refuses a signature naming someone else's vault.
         vault,
@@ -436,20 +632,30 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
 
   return (
     <div className="space-y-3">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field
+          label="Agent id"
+          hint="A stable label for this agent's credential. Lowercase letters, digits, dash, underscore."
+        >
+          <TextInput
+            value={agentId}
+            onChange={(e) => setAgentId(e.target.value)}
+            placeholder="research-agent"
+            spellCheck={false}
+          />
+        </Field>
+        <Field label="Agent address" hint="Must already be registered on this vault.">
+          <TextInput
+            value={agentAddress}
+            onChange={(e) => setAgentAddress(e.target.value)}
+            placeholder="0x..."
+            spellCheck={false}
+            className="font-mono"
+          />
+        </Field>
+      </div>
+
       <div className="flex flex-wrap items-end gap-3">
-        <div className="min-w-[240px] flex-1">
-          <Field
-            label="Agent id"
-            hint="A stable label for this agent's credential. Lowercase letters, digits, dash, underscore."
-          >
-            <TextInput
-              value={agentId}
-              onChange={(e) => setAgentId(e.target.value)}
-              placeholder="research-agent"
-              spellCheck={false}
-            />
-          </Field>
-        </div>
         <Button onClick={() => void run("issue")} disabled={disabled || busy !== null}>
           {busy === "issue" ? "Waiting for signature..." : "Issue key"}
         </Button>
@@ -461,15 +667,18 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
         </Button>
       </div>
 
-      {agent ? (
+      {isAddress(agentAddress.trim()) ? (
         <PanelNote>
-          Authorizing <span className="tabular-nums">{truncateAddress(agent)}</span>. Rotate revokes
-          every existing key for this agent id before issuing a new one. Revoke leaves the on-chain
-          policy untouched: the key can no longer call the API, but the address keeps whatever
+          Authorizing <span className="tabular-nums">{truncateAddress(agentAddress.trim())}</span>. Rotate
+          revokes every existing key for this agent id before issuing a new one. Revoke leaves the
+          on-chain policy untouched: the key can no longer call the API, but the address keeps whatever
           allowance it already had until the owner tightens it.
         </PanelNote>
       ) : (
-        <PanelNote>Look up an agent above to manage its credentials.</PanelNote>
+        <PanelNote>
+          Enter the agent address this key is for. The signature binds to it, and the server refuses a
+          signature naming an address that is not registered on this vault.
+        </PanelNote>
       )}
 
       {error ? <p className="text-[12px] text-state-blocked">{error}</p> : null}

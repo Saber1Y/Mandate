@@ -131,6 +131,71 @@ export async function readServicePolicy(vault: Address, agent: Address, target: 
   );
 }
 
+/** One recipient row for an agent, with live state read back from the vault. */
+export interface ServiceAllowlistEntry {
+  target: Address;
+  label: string;
+  maxPerTx: bigint;
+  dailyCap: bigint;
+  expiry: bigint;
+  spentToday: bigint;
+  allowed: boolean;
+}
+
+/**
+ * Which recipients an agent is allowed to pay, reconstructed from `ServiceAllowlisted` events.
+ *
+ * `services` is a nested mapping with no enumerator, so the contract cannot answer "list everything
+ * this agent may pay". Rather than inventing a server-side index that could disagree with the chain,
+ * this replays the log. Targets are discovered from the events and then read back with `getService`,
+ * so the displayed caps and `allowed` flag come from current state, not from the event payload.
+ *
+ * Bounded window for the same reason as spend history: an unbounded getLogs over the vault's whole
+ * life can exceed provider limits. A recipient configured before the window will not appear, so the
+ * caller must still allow pasting an address directly.
+ */
+export async function readServiceAllowlist(params: {
+  vault: Address;
+  agent: Address;
+  fromBlock?: bigint;
+}): Promise<ServiceAllowlistEntry[]> {
+  const {vault, agent} = params;
+
+  let targets: Address[] = [];
+  try {
+    const head = await publicClient.getBlockNumber();
+    const fromBlock = params.fromBlock ?? (head > HISTORY_WINDOW ? head - HISTORY_WINDOW : 0n);
+    const logs = await publicClient.getContractEvents({
+      address: vault,
+      abi: mandateVaultAbi,
+      eventName: "ServiceAllowlisted",
+      args: {agent},
+      fromBlock,
+      toBlock: head,
+    });
+    targets = [...new Set(logs.map((l) => l.args.target as Address))];
+  } catch {
+    return [];
+  }
+
+  // Read current state per target rather than trusting the last event's values.
+  return Promise.all(
+    targets.map(async (target) => {
+      const policy = await readServicePolicy(vault, agent, target).catch(() => undefined);
+      if (!policy) return undefined;
+      return {
+        target,
+        label: policy.label,
+        maxPerTx: policy.maxPerTx,
+        dailyCap: policy.dailyCap,
+        expiry: policy.expiry,
+        spentToday: policy.spentToday,
+        allowed: policy.allowed,
+      } satisfies ServiceAllowlistEntry;
+    }),
+  ).then((rows) => rows.filter((r): r is ServiceAllowlistEntry => r !== undefined));
+}
+
 export interface SpendEvent {
   requestId: `0x${string}`;
   kind: "requested" | "executed" | "approved" | "rejected" | "expired" | "cancelled" | "settled";
