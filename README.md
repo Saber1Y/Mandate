@@ -66,13 +66,13 @@ RPC `https://rpc.bohr.life` · Explorer `https://scan.bohr.life`
 
 | Contract | Address |
 |----------|---------|
-| **`MandateVaultFactory`** | [`0xcc9eAfFA4AB9108eB4E66952c420630D6340A719`](https://scan.bohr.life/address/0xcc9eAfFA4AB9108eB4E66952c420630D6340A719) |
-| **`MandateVault`** | [`0x45672a2cC6dfA5b975A6DBC5638C0154c01C85Be`](https://scan.bohr.life/address/0x45672a2cC6dfA5b975A6DBC5638C0154c01C85Be) |
-| **Owner / bootstrap executor** | [`0x3F5b96A494061F7338Da529e3047809Ac6a7FB84`](https://scan.bohr.life/address/0x3F5b96A494061F7338Da529e3047809Ac6a7FB84) |
+| **`MandateVaultFactory` (current fixed deployment)** | [`0x30844f81b9723E4f291f0eE0C5fc10eC89bAc5DF`](https://scan.bohr.life/address/0x30844f81b9723E4f291f0eE0C5fc10eC89bAc5DF) |
+| **Demo org vault** | [`0x03cAa220BD99BdF1d768D2D6dE23744e9741D5cD`](https://scan.bohr.life/address/0x03cAa220BD99BdF1d768D2D6dE23744e9741D5cD) |
+| **Gas-only executor** | [`0xcD06F1486472185B8e3AE408D3EcA40BF24474Dc`](https://scan.bohr.life/address/0xcD06F1486472185B8e3AE408D3EcA40BF24474Dc) |
 | **tUSDT (6 decimals)** | [`0x75edC9335175Fc0552D51D48439F229c10420fe3`](https://scan.bohr.life/address/0x75edC9335175Fc0552D51D48439F229c10420fe3) |
 
-The testnet deployment uses one EOA as both owner and executor, which is convenient for a demo but
-**not** the production shape - see [Security](./security.md).
+The original factory and vault remain on testnet as legacy artifacts. The current factory rejects
+past policy expiries and pre-authorizes a distinct gas-only executor; new demo orgs should use it.
 
 ### Proven on-chain artifacts
 
