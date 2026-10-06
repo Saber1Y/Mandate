@@ -49,6 +49,39 @@ cannot redirect this server at another host or another treasury.
 **Cursor** - `.cursor/mcp.json`, same shape. **Any other MCP client**: stdio transport, same
 `command`/`args`/`env` triple.
 
+## Hosting it instead
+
+stdio means every client spawns its own process, which no client that can only reach a network
+endpoint can use. For a hosted deployment the same server speaks Streamable HTTP:
+
+```bash
+MANDATE_MCP_TRANSPORT=http MANDATE_MCP_PORT=8787 \
+MANDATE_API_KEY=mdt_... MANDATE_API_BASE=https://your-mandate-host \
+node mcp/server.mjs
+```
+
+Or with the included image, which installs nothing - the server imports only `node:crypto` and
+`node:readline`:
+
+```bash
+docker buildx build --load -f Dockerfile.mcp -t mandate-mcp .
+
+docker run -p 8787:8787 \
+  -e MANDATE_API_KEY=mdt_... \
+  -e MANDATE_API_BASE=https://your-mandate-host \
+  mandate-mcp
+```
+
+`POST /mcp` carries one JSON-RPC message or a batch. `GET /healthz` is a dependency-free readiness
+probe.
+
+**It is not stateless.** A session id is issued by `initialize` and required on every later request;
+requests without a live session get `403`. That is deliberate - a stateless endpoint reachable over
+a network that can move money would undo the key-scoped design, since anyone who found the port could
+call `request_payment`. Sessions expire after 30 minutes.
+
+Both transports are covered by `npm run mcp:check`.
+
 ## Tools
 
 | Tool | Does | Notes |
@@ -86,7 +119,9 @@ a real hazard, and serialising costs nothing at human request rates.
 npm run mcp:check
 ```
 
-Spawns the server and drives the JSON-RPC handshake against a fake API, so the protocol layer is
-checked without spending money or needing the dashboard running. Covers the handshake, the content
-envelope, refusal-as-data, float rejection, the dry run, error codes, and that stdout carries only
-protocol frames.
+Spawns the real server twice - once on stdio, once on HTTP - against a fake API, so the protocol
+layer is checked without spending money or needing the dashboard running. Covers the handshake, the
+content envelope, refusal-as-data, float rejection, the dry run, error codes, that stdout carries only
+protocol frames, and that the HTTP transport refuses tool calls without a live session.
+
+44 checks.

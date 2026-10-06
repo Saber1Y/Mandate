@@ -44,14 +44,6 @@ function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
-function ok(id, result) {
-  send({jsonrpc: "2.0", id, result});
-}
-
-function fail(id, code, message, data) {
-  send({jsonrpc: "2.0", id, error: {code, message, ...(data ? {data} : {})}});
-}
-
 /** JSON-RPC error codes, including the implementation-defined -32000 range MCP uses for tool errors. */
 const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
@@ -436,38 +428,37 @@ async function dispatch(method, params) {
   }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Transports
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * A reply to send, or null for a notification that must not be answered.
+ *
+ * Returning the decision instead of writing straight to stdout is what lets the same protocol core
+ * serve stdio and HTTP without either transport owning the JSON-RPC semantics.
+ */
 async function handle(message) {
   const {id, method, params} = message ?? {};
 
   if (message === null || typeof message !== "object" || typeof method !== "string") {
-    if (id !== undefined) fail(id, INVALID_REQUEST, "Request must be a JSON-RPC object with a method.");
-    return;
+    if (id !== undefined) return {error: {code: INVALID_REQUEST, message: "Request must be a JSON-RPC object with a method."}};
+    return null;
   }
 
   try {
     const result = await dispatch(method, params);
     // A notification has no id and must not be answered, or clients report a protocol error.
-    if (id === undefined || id === null) return;
-    ok(id, result ?? {});
+    if (id === undefined || id === null) return null;
+    return {jsonrpc: "2.0", id, result: result ?? {}};
   } catch (e) {
     const err = /** @type {Error & {rpcCode?: number}} */ (e);
-    if (id === undefined || id === null) return;
-    fail(id, err.rpcCode ?? TOOL_ERROR, err.message ?? "Tool failed");
+    if (id === undefined || id === null) return null;
+    return {jsonrpc: "2.0", id, error: {code: err.rpcCode ?? TOOL_ERROR, message: err.message ?? "Tool failed"}};
   }
 }
 
-async function main() {
-  if (!API_KEY) {
-    process.stderr.write(
-      "mandate-mcp: MANDATE_API_KEY is not set. The server needs one agent key from /api/agents/credentials.\n",
-    );
-    process.exit(2);
-  }
-
-  // stdout is the protocol channel, so nothing else may write to it. Any stray console.log from an
-  // imported module would corrupt the stream, hence the redirect.
-  console.log = (...args) => process.stderr.write(`${args.join(" ")}\n`);
-
+async function serveStdio() {
   const rl = createInterface({input: process.stdin, crlfDelay: Infinity});
 
   // Requests are handled strictly in order. Two concurrent spends sharing a generated idempotency
@@ -482,16 +473,147 @@ async function main() {
       try {
         message = JSON.parse(trimmed);
       } catch {
-        fail(null, PARSE_ERROR, "Invalid JSON");
+        send({jsonrpc: "2.0", id: null, error: {code: PARSE_ERROR, message: "Invalid JSON"}});
         return;
       }
-      if (Array.isArray(message)) {
-        for (const entry of message) await handle(entry);
-        return;
+      for (const entry of Array.isArray(message) ? message : [message]) {
+        const reply = await handle(entry);
+        if (reply) send(reply);
       }
-      await handle(message);
     });
   }
+}
+
+/**
+ * Streamable HTTP transport.
+ *
+ * Exists so the server can be hosted rather than spawned by each client. A single POST carries one
+ * JSON-RPC message (or a batch) and the response is the reply, or 202 with no body for a notification -
+ * which is the shape the Streamable HTTP transport specifies for a request/response exchange.
+ *
+ * Deliberately NOT stateless JSON-RPC: a real spend needs a session, and giving every caller an
+ * unauthenticated session that can move money would undo the key-scoped design. Sessions are issued
+ * here and each still carries the same single agent key from the environment.
+ */
+async function serveHttp() {
+  const {createServer} = await import("node:http");
+  const port = Number(process.env.MANDATE_MCP_PORT ?? 8787);
+
+  /** @type {Map<string, {createdAt: number}>} */
+  const sessions = new Map();
+  const SESSION_TTL_MS = 30 * 60 * 1000;
+
+  function newSessionId() {
+    return randomBytes(24).toString("hex");
+  }
+
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+
+    // Docker and load balancers probe this; keep it dependency-free and always cheap.
+    if (url.pathname === "/healthz") {
+      res.writeHead(200, {"content-type": "application/json"});
+      res.end(JSON.stringify({ok: true, tools: TOOLS.length}));
+      return;
+    }
+
+    if (url.pathname !== "/mcp" || req.method !== "POST") {
+      res.writeHead(405, {allow: "POST"});
+      res.end();
+      return;
+    }
+
+    let body = "";
+    req.on("data", (c) => {
+      body += c;
+      // A spending tool takes no arguments worth megabytes; refuse rather than buffer.
+      if (body.length > 1_000_000) req.destroy();
+    });
+
+    req.on("end", async () => {
+      let message;
+      try {
+        message = JSON.parse(body || "{}");
+      } catch {
+        res.writeHead(400, {"content-type": "application/json"});
+        res.end(JSON.stringify({jsonrpc: "2.0", id: null, error: {code: PARSE_ERROR, message: "Invalid JSON"}}));
+        return;
+      }
+
+      const isInitialize = !Array.isArray(message) && message?.method === "initialize";
+      const sessionId = isInitialize ? newSessionId() : req.headers["mcp-session-id"];
+
+      // Session-bearing requests must present a session. Without this the endpoint is an
+      // unauthenticated spend oracle for anyone who can reach the port.
+      if (!isInitialize) {
+        const known = typeof sessionId === "string" ? sessions.get(sessionId) : undefined;
+        if (!known) {
+          res.writeHead(403, {"content-type": "application/json"});
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: null,
+              error: {code: INVALID_REQUEST, message: "Unknown or expired MCP session. Send initialize first."},
+            }),
+          );
+          return;
+        }
+        if (Date.now() - known.createdAt > SESSION_TTL_MS) {
+          sessions.delete(sessionId);
+          res.writeHead(403, {"content-type": "application/json"});
+          res.end(JSON.stringify({jsonrpc: "2.0", id: null, error: {code: INVALID_REQUEST, message: "Session expired."}}));
+          return;
+        }
+        known.createdAt = Date.now();
+      }
+
+      const replies = [];
+      for (const entry of Array.isArray(message) ? message : [message]) {
+        const reply = await handle(entry);
+        if (reply) replies.push(reply);
+      }
+
+      const headers = {"content-type": "application/json"};
+      if (isInitialize) {
+        sessions.set(sessionId, {createdAt: Date.now()});
+        headers["mcp-session-id"] = sessionId;
+      }
+
+      if (replies.length === 0) {
+        res.writeHead(202, headers);
+        res.end();
+        return;
+      }
+      res.writeHead(200, headers);
+      res.end(JSON.stringify(Array.isArray(message) ? replies : replies[0]));
+    });
+  });
+
+  await new Promise((resolve) => server.listen(port, "0.0.0.0", resolve));
+  process.stderr.write(`mandate-mcp: listening on http://0.0.0.0:${port}/mcp\n`);
+}
+
+async function main() {
+  if (!API_KEY) {
+    process.stderr.write(
+      "mandate-mcp: MANDATE_API_KEY is not set. The server needs one agent key from /api/agents/credentials.\n",
+    );
+    process.exit(2);
+  }
+
+  const transport = (process.env.MANDATE_MCP_TRANSPORT ?? "stdio").toLowerCase();
+  if (transport === "stdio") {
+    // stdout is the protocol channel, so nothing else may write to it. Any stray console.log from an
+    // imported module would corrupt the stream, hence the redirect.
+    console.log = (...args) => process.stderr.write(`${args.join(" ")}\n`);
+    await serveStdio();
+    return;
+  }
+  if (transport === "http") {
+    await serveHttp();
+    return;
+  }
+  throw new Error(`Unknown MANDATE_MCP_TRANSPORT: ${transport}. Use "stdio" or "http".`);
 }
 
 main().catch((e) => {

@@ -277,6 +277,95 @@ check(
   seenAuth.every((h) => h === "Bearer mdt_test_key_not_a_real_credential"),
 );
 
+
+// ---------------------------------------------------------------------------------------------
+// HTTP transport
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The hosted transport has a different failure mode from stdio: it is reachable over a network, so
+ * the question is not "does it speak JSON-RPC" but "can anyone who finds the port spend money".
+ */
+console.log("\nhttp transport");
+{
+  const port = 8899;
+  const httpServer = spawn(process.execPath, [path.join(root, "mcp", "server.mjs")], {
+    env: {
+      ...process.env,
+      MANDATE_API_KEY: "mdt_test_key_not_a_real_credential",
+      MANDATE_API_BASE: base,
+      MANDATE_MCP_TRANSPORT: "http",
+      MANDATE_MCP_PORT: String(port),
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let httpErr = "";
+  httpServer.stderr.on("data", (d) => (httpErr += d));
+
+  const origin = `http://127.0.0.1:${port}`;
+  // Poll rather than sleep, so a slow start does not produce a flaky result.
+  for (let i = 0; i < 60; i++) {
+    try {
+      const r = await fetch(`${origin}/healthz`);
+      if (r.ok) break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  const post = (body, headers = {}) =>
+    fetch(`${origin}/mcp`, {
+      method: "POST",
+      headers: {"content-type": "application/json", ...headers},
+      body: JSON.stringify(body),
+    });
+
+  const health = await fetch(`${origin}/healthz`);
+  check("healthz reports the tool count", health.ok && (await health.json()).tools === 6);
+
+  const noSession = await post({jsonrpc: "2.0", id: 1, method: "tools/call", params: {name: "get_budget", arguments: {}}});
+  check("a tool call without a session is refused", noSession.status === 403, `status ${noSession.status}`);
+
+  const init = await post({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: {protocolVersion: "2025-06-18", capabilities: {}, clientInfo: {name: "c", version: "1"}},
+  });
+  const sid = init.headers.get("mcp-session-id");
+  check("initialize issues a session id", Boolean(sid) && sid.length >= 32);
+
+  const withSession = await post(
+    {jsonrpc: "2.0", id: 2, method: "tools/call", params: {name: "get_budget", arguments: {}}},
+    {"mcp-session-id": sid},
+  );
+  const body = await withSession.json();
+  check(
+    "a tool call with the session succeeds",
+    withSession.status === 200 && body.result?.content?.[0]?.type === "text",
+  );
+
+  const notification = await post({jsonrpc: "2.0", method: "notifications/initialized"}, {"mcp-session-id": sid});
+  check("a notification returns 202 with no body", notification.status === 202);
+
+  const bad = await post({jsonrpc: "2.0", id: 3, method: "tools/list"}, {"mcp-session-id": "deadbeef"});
+  check("an unknown session is refused", bad.status === 403);
+
+  const get = await fetch(`${origin}/mcp`);
+  check("GET /mcp is rejected rather than served", get.status === 405);
+
+  // The startup banner is expected output on stderr; only a crash or a thrown error is a failure.
+  const unexpected = httpErr
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l && !l.includes("listening on"));
+  check("the hosted server logged no errors", unexpected.length === 0, unexpected.join(" | ").slice(0, 200));
+  check("it announced the listen address", httpErr.includes("listening on"));
+
+  httpServer.kill();
+  await new Promise((r) => setTimeout(r, 150));
+}
+
 child.stdin.end();
 await wait(200);
 child.kill();
