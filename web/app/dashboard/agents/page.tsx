@@ -831,7 +831,7 @@ const run = async (action: CredentialAction) => {
           because it embeds the plaintext key. Rebuilding it from a key the operator already holds
           happens entirely in the browser: the key is never sent anywhere, which is the same
           property that lets the server store only a hash. */}
-      {!issued && /^mdt_[A-Za-z0-9]{20,}$/.test(existingKey.trim()) ? (
+      {!issued ? (
         <div className="rounded-lg border border-border bg-surface-muted px-4 py-3">
           <div className="text-[12px] font-medium text-text-primary">
             Already have a key? Build its handoff prompt
@@ -853,7 +853,7 @@ const run = async (action: CredentialAction) => {
             <Button
               size="sm"
               variant="secondary"
-              disabled={!isAddress(effectiveAddress.trim())}
+              disabled={!/^mdt_[A-Za-z0-9]{20,}$/.test(existingKey.trim()) || !isAddress(effectiveAddress.trim())}
               onClick={() => void buildHandoff(existingKey.trim(), effectiveAddress.trim() as Address)}
             >
               Build prompt
