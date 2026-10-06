@@ -13,3 +13,5 @@ out/
 next-env.d.ts
 # SQLite data (local dev database)
 data/
+.vercel
+.env*

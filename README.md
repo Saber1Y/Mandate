@@ -104,6 +104,11 @@ adversarialtesting.md     how each control is verified
 
 ## Quick start
 
+Production dashboard: [mandate-two-alpha.vercel.app](https://mandate-two-alpha.vercel.app)
+
+The deployed app points at the current fixed factory and gas-only executor. The MCP server can use
+the production API by setting `MANDATE_API_BASE=https://mandate-two-alpha.vercel.app`.
+
 ```bash
 # Contracts - build + test
 forge build

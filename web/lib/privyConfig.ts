@@ -18,6 +18,6 @@ export const privyConfig: PrivyClientConfig = {
   defaultChain: botChain,
   appearance: {
     theme: "light",
-    accentColor: "#0066cc",
+    accentColor: "#0f766e",
   },
 };
