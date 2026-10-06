@@ -9,7 +9,7 @@ import {requestStatusName} from "@/lib/contracts";
 import {publicClient} from "@/lib/chain";
 import {isSameAddress, formatTusdt, truncateAddress, truncateHash, timeAgo} from "@/lib/format";
 import {explorerAddress, explorerTx} from "@/lib/chain";
-import {useTreasuryState, useSpendHistory, useAgentBudget, useRejectedAttempts} from "@/lib/useChainRead";
+import {useTreasuryState, useSpendHistory, useAgentBudget} from "@/lib/useChainRead";
 import {useActiveAddress, usePrivyWalletClient} from "@/lib/usePrivyWallet";
 import {useRole} from "@/lib/useRole";
 import {useVault} from "@/lib/useVault";
@@ -55,7 +55,6 @@ export default function DashboardPage() {
   const mine = useAgentBudget(vault, address);
 
   const pending = usePendingRequests(vault);
-  const attempts = useRejectedAttempts(25);
   const settled = useMemo(
     () => (history.data ?? []).filter((e) => e.kind === "executed").slice(0, 6),
     [history.data],
@@ -134,17 +133,6 @@ export default function DashboardPage() {
             label="Approved"
             value={approvedCount}
             sub={<span className="text-text-muted">settlements on chain</span>}
-          />
-        </Card>
-        <Card tone="paper" pad="md">
-          <StatTile
-            label="Blocked"
-            value={attempts.data?.length ?? "-"}
-            sub={
-              <span className="text-text-muted">
-                {attempts.data?.length ? "policy rejections" : "recorded rejections"}
-              </span>
-            }
           />
         </Card>
         <Card tone="paper" pad="md">
@@ -310,12 +298,12 @@ export default function DashboardPage() {
         </Panel>
 
         <Panel title="Recent decisions" subtitle="Settled on chain, and refused by policy">
-          {history.loading || attempts.loading ? (
+          {history.loading ? (
             <div className="space-y-2">
               <Skeleton className="h-12 w-full" />
               <Skeleton className="h-12 w-full" />
             </div>
-          ) : settled.length === 0 && (attempts.data?.length ?? 0) === 0 ? (
+          ) : settled.length === 0 ? (
             <PanelNote>
               Nothing yet. A settled spend appears here from the chain; a refused one appears with the
               reason the vault gave.
@@ -335,25 +323,6 @@ export default function DashboardPage() {
                   <div className="flex items-center gap-2">
                     <span className="text-[11px] font-medium text-state-approved">Approved</span>
                     <TxChip href={explorerTx(e.txHash)} label={truncateHash(e.txHash)} tone="mint" />
-                  </div>
-                </div>
-              ))}
-              {(attempts.data ?? []).slice(0, 8).map((a) => (
-                <div
-                  key={a.id}
-                  className="flex items-start justify-between gap-3 rounded-lg border border-state-blocked/25 bg-white px-4 py-3"
-                >
-                  <div className="min-w-0">
-                    <div className="text-[13px] font-medium text-text-primary tabular-nums">
-                      {formatTusdt(BigInt(a.amount))} tUSDT
-                    </div>
-                    <div className="mt-0.5 text-[11px] text-text-muted">
-                      to {truncateAddress(a.recipient)} &middot; {a.detail}
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2">
-                    <span className="text-[11px] font-medium text-state-blocked">Blocked</span>
-                    <span className="font-mono text-[10px] text-text-muted">{a.reason}</span>
                   </div>
                 </div>
               ))}

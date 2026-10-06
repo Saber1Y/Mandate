@@ -189,17 +189,27 @@ export function recordRejectedAttempt(input: {
   }
 }
 
-export function listRejectedAttempts(limit = 25): RejectedAttempt[] {
+export function listRejectedAttempts(limit = 25, vault?: string): RejectedAttempt[] {
   try {
     const db = getDb();
     pruneExpiredRows(db);
+    const bounded = Math.max(1, Math.min(200, limit));
+    if (vault) {
+      return db
+        .prepare(
+          `SELECT id, vault, agent, agent_id AS agentId, recipient, amount, token, reason, detail,
+                  created_at AS createdAt
+             FROM rejected_attempts WHERE vault = ? ORDER BY id DESC LIMIT ?`,
+        )
+        .all(vault.toLowerCase(), bounded) as unknown as RejectedAttempt[];
+    }
     return db
       .prepare(
         `SELECT id, vault, agent, agent_id AS agentId, recipient, amount, token, reason, detail,
                 created_at AS createdAt
            FROM rejected_attempts ORDER BY id DESC LIMIT ?`,
       )
-      .all(Math.max(1, Math.min(200, limit))) as unknown as RejectedAttempt[];
+      .all(bounded) as unknown as RejectedAttempt[];
   } catch {
     return [];
   }
