@@ -191,7 +191,9 @@ export function recordRejectedAttempt(input: {
 
 export function listRejectedAttempts(limit = 25): RejectedAttempt[] {
   try {
-    return getDb()
+    const db = getDb();
+    pruneExpiredRows(db);
+    return db
       .prepare(
         `SELECT id, vault, agent, agent_id AS agentId, recipient, amount, token, reason, detail,
                 created_at AS createdAt

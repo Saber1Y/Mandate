@@ -200,16 +200,21 @@ export function WithdrawVault({
   vault,
   balance,
   isOwner,
+  onChanged,
 }: {
   vault: Address;
   balance: bigint | undefined;
   isOwner: boolean;
+  onChanged: () => void;
 }) {
   const {address} = useActiveAddress();
   const [recipient, setRecipient] = useState("");
   const [amount, setAmount] = useState("");
   const [localError, setLocalError] = useState<string | undefined>();
-  const onDone = useCallback(() => setAmount(""), []);
+  const onDone = useCallback(() => {
+    setAmount("");
+    onChanged();
+  }, [onChanged]);
 
   const withdraw = useOwnerWrite(onDone);
 

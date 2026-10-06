@@ -236,6 +236,7 @@ async function describeBudget() {
     approvalThreshold: p.approvalThreshold,
     ownerSignatureRequired: p.approvalThreshold > 0,
     policyActive: p.active,
+    policyExpiryTimestamp: p.expiry,
     policyExpiry: p.expiry === 0 ? "never" : new Date(p.expiry * 1000).toISOString(),
     vaultBalance: {base: body.treasuryBalance, display: human(body.treasuryBalance)},
   };
@@ -248,6 +249,12 @@ async function runCheckSpend(args) {
   const problems = [];
   if (!budget.registeredOnChain) problems.push("You are not registered as an agent on this vault.");
   if (!budget.policyActive) problems.push("Your policy is inactive, so every request is refused.");
+  if (
+    Number(budget.policyExpiryTimestamp) > 0 &&
+    Math.floor(Date.now() / 1000) > Number(budget.policyExpiryTimestamp)
+  ) {
+    problems.push(`Your policy expired at ${budget.policyExpiry}. Every request is refused until the owner renews it.`);
+  }
   if (!budget.tokenAllowed) problems.push("tUSDT is not allowlisted for you, so every request is refused.");
   if (amount <= 0n) problems.push("Amount must be greater than zero.");
   if (amount > BigInt(budget.tUSDT.maxPerTx.base)) {

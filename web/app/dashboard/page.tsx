@@ -188,7 +188,12 @@ export default function DashboardPage() {
           onChanged={treasury.refetch}
         />
         <Panel title="Treasury exit" subtitle="Owner authority" className="mt-4">
-          <WithdrawVault vault={vault!} balance={t.treasuryBalance} isOwner={isOwner} />
+          <WithdrawVault
+            vault={vault!}
+            balance={t.treasuryBalance}
+            isOwner={isOwner}
+            onChanged={treasury.refetch}
+          />
         </Panel>
       </div>
 
