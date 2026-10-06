@@ -75,6 +75,52 @@ function initSchema(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_rejected_attempts_vault
       ON rejected_attempts (vault, created_at);
   `);
+  pruneExpiredRows(db);
+}
+
+/** Refuse rows older than this. A rejection is an operational signal, not an audit record. */
+const RETENTION_DAYS = 30;
+
+/**
+ * Hard ceiling on rows kept per vault.
+ *
+ * Age alone is not enough: a misbehaving agent can generate thousands of refusals inside a single
+ * retention window, and since the read path is capped rather than paginated, an unbounded table is
+ * both a storage problem and a slow-query problem. When the cap bites, the oldest rows for that vault
+ * go first, because the newest refusals are the ones being diagnosed.
+ */
+const MAX_ROWS_PER_VAULT = 5_000;
+
+/**
+ * Prune on read and write rather than on a timer.
+ *
+ * This process is a Next.js server that may be several instances, so a background job would need its
+ * own coordination to avoid N servers each pruning the same table. Pruning is idempotent, so doing it
+ * opportunistically from the paths that already touch the table is simpler and has no scheduler to
+ * run. The cost is a single indexed DELETE, which is cheap against a bounded table.
+ */
+function pruneExpiredRows(db: Database.Database): void {
+  try {
+    const cutoff = Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    db.prepare("DELETE FROM rejected_attempts WHERE created_at < ?").run(cutoff);
+
+    // Trim the oldest surplus *per vault*, so one noisy tenant cannot evict another tenant's
+    // history. `PARTITION BY vault` is what makes this per-vault; a global LIMIT would let the
+    // loudest vault silently delete everyone else's rows.
+    db.exec(`
+      DELETE FROM rejected_attempts
+      WHERE id IN (
+        SELECT id FROM (
+          SELECT id,
+                 ROW_NUMBER() OVER (PARTITION BY vault ORDER BY id DESC) AS rank_in_vault
+          FROM rejected_attempts
+        )
+        WHERE rank_in_vault > ${MAX_ROWS_PER_VAULT}
+      );
+    `);
+  } catch {
+    // Retention is housekeeping. Failing to prune must never fail a request or a read.
+  }
 }
 
 /**
@@ -121,23 +167,23 @@ export function recordRejectedAttempt(input: {
   detail?: string;
 }): void {
   try {
-    getDb()
-      .prepare(
-        `INSERT INTO rejected_attempts
-           (vault, agent, agent_id, recipient, amount, token, reason, detail, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        input.vault,
-        input.agent,
-        input.agentId,
-        input.recipient,
-        input.amount,
-        input.token,
-        input.reason,
-        describeRejection(input.reason, input.detail),
-        Date.now(),
-      );
+    const db = getDb();
+    db.prepare(
+      `INSERT INTO rejected_attempts
+         (vault, agent, agent_id, recipient, amount, token, reason, detail, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      input.vault,
+      input.agent,
+      input.agentId,
+      input.recipient,
+      input.amount,
+      input.token,
+      input.reason,
+      describeRejection(input.reason, input.detail),
+      Date.now(),
+    );
+    pruneExpiredRows(db);
   } catch {
     // Losing an observability row must never turn a clean 422 into a 500.
   }
