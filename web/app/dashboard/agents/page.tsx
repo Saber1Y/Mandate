@@ -20,7 +20,7 @@ import {
 } from "@/lib/format";
 import {explorerAddress, publicClient} from "@/lib/chain";
 import {readServiceAllowlist, type ServiceAllowlistEntry} from "@/lib/reads";
-import {agentHandoffPrompt} from "@/lib/handoff";
+import {agentHandoffPrompt, clearStoredHandoff, loadStoredHandoff, saveStoredHandoff} from "@/lib/handoff";
 import {useTreasuryState} from "@/lib/useChainRead";
 import {useOwnerWrite} from "@/lib/useOwnerWrite";
 import {useWalletMessageSigner, useActiveAddress} from "@/lib/usePrivyWallet";
@@ -34,6 +34,7 @@ import {TextInput, Field, Toggle} from "@/components/ui/Input";
 import {Chip} from "@/components/ui/Chip";
 import {Skeleton} from "@/components/ui/Row";
 import {PageLoader} from "@/components/ui/PageLoader";
+import {X} from "@/components/ui/Icons";
 
 /**
  * Owner control plane: register agents, set policy, manage the token and service allowlists.
@@ -644,7 +645,7 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
   const {signMessage} = useWalletMessageSigner();
   const {address: connected} = useActiveAddress();
   const [agentId, setAgentId] = useState("");
-  // createVault registers the caller as the vault's first agent, so the connected wallet is already a
+  // Create vault registers the caller as the vault's first agent, so the connected wallet is already a
   // valid agent here and is what the operator almost always wants. Default to it rather than making
   // them retype the address the app already knows.
   const [agentAddress, setAgentAddress] = useState(agent ?? "");
@@ -654,6 +655,14 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
   const [handoff, setHandoff] = useState<string | undefined>();
   const [handoffCopied, setHandoffCopied] = useState(false);
   const [existingKey, setExistingKey] = useState("");
+
+  // A refresh or a detour to another dashboard page must not destroy a prompt the operator has not
+  // copied yet. The stored copy embeds the plaintext key, so it lives in this browser's localStorage
+  // only and disappears on the X, rotate, or revoke.
+  useEffect(() => {
+    const stored = loadStoredHandoff(vault);
+    if (stored !== undefined) setHandoff(stored);
+  }, [vault]);
 
   // Seed from the lookup when it resolves, but never clobber a different address in this field.
   useEffect(() => {
@@ -690,28 +699,30 @@ const buildHandoff = useCallback(
         readServiceAllowlist({vault, agent}).catch(() => []),
       ]);
       const baseUrl = typeof window === "undefined" ? "" : window.location.origin;
-      setHandoff(
-        agentHandoffPrompt(
-          {
-            agent,
-            maxPerTx: policy.maxPerTx,
-            dailyCap: policy.dailyCap,
-            remainingDailyCap: remaining,
-            approvalThreshold: Number(policy.approvalThreshold),
-            policyExpiry: policy.expiry,
-            tokenAddress: TUSDT_ADDRESS,
-            tokenSymbol: "tUSDT",
-            recipients: allowlist
-              .filter((r) => r.allowed)
-              .map((r) => ({address: r.target, label: r.label, maxPerTx: r.maxPerTx})),
-            vault,
-          },
-          {baseUrl, apiKey},
-        ),
+      const prompt = agentHandoffPrompt(
+        {
+          agent,
+          maxPerTx: policy.maxPerTx,
+          dailyCap: policy.dailyCap,
+          remainingDailyCap: remaining,
+          approvalThreshold: Number(policy.approvalThreshold),
+          policyExpiry: policy.expiry,
+          tokenAddress: TUSDT_ADDRESS,
+          tokenSymbol: "tUSDT",
+          recipients: allowlist
+            .filter((r) => r.allowed)
+            .map((r) => ({address: r.target, label: r.label, maxPerTx: r.maxPerTx})),
+          vault,
+        },
+        {baseUrl, apiKey},
       );
+      setHandoff(prompt);
+      saveStoredHandoff(vault, prompt);
     } catch {
       // The key is still valid and shown above; a failed prompt build must not block issuing it.
+      // The previous prompt embeds a key that rotates on every issue, so drop it too.
       setHandoff(undefined);
+      clearStoredHandoff(vault);
     }
   },
   [vault],
@@ -762,6 +773,12 @@ const run = async (action: CredentialAction) => {
         setIssued({apiKey: payload.apiKey, keyHint: payload.keyHint ?? ""});
         setHandoff(undefined);
         void buildHandoff(payload.apiKey, target as Address);
+      } else if (action === "revoke") {
+        // Revoke kills every key for this agent id. A stored prompt embeds that dead key, so it
+        // must not survive: without this an operator could paste a briefing nobody can authenticate.
+        setIssued(null);
+        setHandoff(undefined);
+        clearStoredHandoff(vault);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not complete the request.");
@@ -827,10 +844,10 @@ const run = async (action: CredentialAction) => {
 
       {error ? <p className="text-[12px] text-state-blocked">{error}</p> : null}
 
-      {/* A key issued before this panel existed has no prompt, and a prompt is never persisted
-          because it embeds the plaintext key. Rebuilding it from a key the operator already holds
-          happens entirely in the browser: the key is never sent anywhere, which is the same
-          property that lets the server store only a hash. */}
+      {/* A key issued before this panel existed has no prompt. Rebuilding it from a key the operator
+          already holds happens entirely in the browser: the key is never sent anywhere, which is the
+          same property that lets the server store only a hash. The rebuilt prompt persists in this
+          browser (and carries the plaintext key) exactly like one built from a fresh issue. */}
       {!issued ? (
         <div className="rounded-lg border border-border bg-surface-muted px-4 py-3">
           <div className="text-[12px] font-medium text-text-primary">
@@ -877,17 +894,35 @@ const run = async (action: CredentialAction) => {
         </div>
       ) : null}
 
-      {/* Rendered whenever a prompt exists, not only in the issue-and-immediately-read state, so it
-          survives navigating away and back within the session. */}
+      {/* Rendered whenever a prompt exists, not only in the issue-and-immediately-read state. A
+          prompt is kept in this browser until it is dismissed (X), rotated, or revoked: navigating
+          away or refreshing does not destroy a briefing the operator has not copied yet. It embeds
+          the plaintext key, so the copy stays in this browser's localStorage and never leaves it. */}
       {handoff ? (
         <div className="rounded-lg border border-border bg-surface-muted px-4 py-3">
-          <div className="text-[12px] font-medium text-text-primary">Give this to the agent</div>
-          <p className="mt-0.5 text-[11px] text-text-muted">
-            Carries the key, your live leash in readable numbers, and the exact calls to make. Paste
-            it into the agent as-is; it is built from the chain right now, so it cannot describe a
-            policy that has since changed.
-          </p>
-          <div className="mt-2 flex gap-2">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-[12px] font-medium text-text-primary">Give this to the agent</div>
+              <p className="mt-0.5 text-[11px] text-text-muted">
+                Carries the key, your live leash in readable numbers, and the exact calls to make.
+                Paste it into the agent as-is; the numbers are quoted from the chain when the prompt
+                is built, so rotate the key or rebuild after you change policy to refresh it.
+              </p>
+            </div>
+            <button
+              type="button"
+              aria-label="Dismiss this handoff"
+              title="Dismiss this handoff"
+              onClick={() => {
+                setHandoff(undefined);
+                clearStoredHandoff(vault);
+              }}
+              className="shrink-0 rounded-md p-1.5 text-text-muted transition-colors hover:bg-border/60 hover:text-text-primary"
+            >
+              <X width={14} height={14} />
+            </button>
+          </div>
+          <div className="mt-3 flex gap-2">
             <Button
               size="sm"
               variant="secondary"

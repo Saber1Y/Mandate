@@ -41,6 +41,49 @@ function plain(base: bigint, decimals: number): string {
 }
 
 /**
+ * A rendered handoff is kept in this browser's localStorage so a refresh or a detour to another
+ * dashboard page does not destroy a prompt the operator has not copied yet. It is scoped to the
+ * vault (one prompt per treasury) and cleared the moment the operator dismisses it with the X, or
+ * when the key it embeds is rotated or revoked.
+ *
+ * The stored value carries the plaintext key, so it is never written to any server or other store:
+ * this is the same browser-only property as the issue response itself. Malformed or oversized
+ * values, and the data being unavailable, all degrade to "no prompt" rather than throwing.
+ */
+const HANDOFF_STORAGE_PREFIX = "mandate.handoff";
+
+export function handoffStorageKey(vault: string): string {
+  return `${HANDOFF_STORAGE_PREFIX}.${vault.toLowerCase()}`;
+}
+
+export function loadStoredHandoff(vault: string): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    return window.localStorage.getItem(handoffStorageKey(vault)) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function saveStoredHandoff(vault: string, text: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(handoffStorageKey(vault), text);
+  } catch {
+    // Quota/availability failures must not fail an issue: the prompt still renders inline.
+  }
+}
+
+export function clearStoredHandoff(vault: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.removeItem(handoffStorageKey(vault));
+  } catch {
+    // Ignored: a failed removal simply means the option never happens on this browser.
+  }
+}
+
+/**
  * `apiKey` is passed in rather than read from anywhere else: it exists only in the response to the
  * issue call and is never retrievable again, so the prompt has to be built at the moment it is known.
  */
