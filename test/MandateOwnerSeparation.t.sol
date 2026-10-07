@@ -71,7 +71,7 @@ contract MandateOwnerSeparationTest is Test {
     function setUp() public {
         vm.warp(START);
         usdt = new MockUSD();
-        factory = new MandateVaultFactory(gasOnlyExecutor);
+        factory = new MandateVaultFactory(gasOnlyExecutor, address(usdt));
     }
 
     /// @dev A vault an org's first agent can actually spend from: token and recipient allowlisted.

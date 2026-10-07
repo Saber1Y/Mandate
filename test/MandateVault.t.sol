@@ -63,7 +63,7 @@ contract MandateVaultTest is Test {
         vm.warp(START);
         usdt = new MockUSD();
         vm.prank(org);
-        vault = new MandateVault(org, executor, 0, 0, 0, 0);
+        vault = new MandateVault(org, executor, address(usdt), 0, 0, 0, 0);
         usdt.mint(address(vault), 10_000e6);
 
         vm.startPrank(org);
@@ -78,6 +78,11 @@ contract MandateVaultTest is Test {
         vault.setAllowedService(agent, recipient, "vendor", 0, 0, 0, true);
         vault.setAllowedService(agent2, recipient, "vendor", 0, 0, 0, true);
         vm.stopPrank();
+    }
+
+    function test_ConstructorWiresSettlementToken() public {
+        assertEq(vault.settlementToken(), address(usdt));
+        assertTrue(vault.allowedTokens(org, address(usdt)), "first agent spends tUSDT with no allow step");
     }
 
     // ------------------------------------------------------------------ helpers
@@ -1003,7 +1008,7 @@ contract MandateVaultExpiryTest is Test {
         vm.warp(START);
         usdt = new MockUSD();
         vm.prank(org);
-        vault = new MandateVault(org, executor, 0, 0, 0, 0);
+        vault = new MandateVault(org, executor, address(usdt), 0, 0, 0, 0);
 
         vm.startPrank(org);
         vault.setAgent(agent, true);
@@ -1030,7 +1035,7 @@ contract MandateVaultExpiryTest is Test {
     function test_Revert_Constructor_PastExpiry() public {
         vm.prank(org);
         vm.expectRevert(MandateVault.ExpiryInPast.selector);
-        new MandateVault(org, executor, MAX_TX, DAILY, uint64(block.timestamp - 1), 1);
+        new MandateVault(org, executor, address(usdt), MAX_TX, DAILY, uint64(block.timestamp - 1), 1);
     }
 
     /// @dev 0 still means "never", including at the current block timestamp, so existing

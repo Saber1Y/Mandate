@@ -13,6 +13,7 @@ import {MandateVault} from "./MandateVault.sol";
 contract MandateVaultFactory {
     address public immutable executor;
     address public immutable deployer;
+    address public immutable settlementToken;
 
     address[] public vaults;
     mapping(address org => address vault) public vaultOf;
@@ -24,12 +25,15 @@ contract MandateVaultFactory {
     error VaultAlreadyExists();
     error InvalidLeash();
 
-    constructor(address executor_) {
+    constructor(address executor_, address settlementToken_) {
         executor = executor_;
+        settlementToken = settlementToken_;
         deployer = msg.sender;
     }
 
     /// @notice Create this org's treasury. The caller becomes the vault owner and its first agent.
+    ///         Every vault is born able to spend the factory's settlement token, so a new agent
+    ///         needs no manual allow step.
     function createVault(uint256 maxPerTx, uint256 dailyCap, uint64 expiry, uint8 approvalThreshold)
         external
         returns (address vault)
@@ -37,7 +41,9 @@ contract MandateVaultFactory {
         if (vaultOf[msg.sender] != address(0)) revert VaultAlreadyExists();
         if (maxPerTx > dailyCap) revert InvalidLeash();
 
-        vault = address(new MandateVault(msg.sender, executor, maxPerTx, dailyCap, expiry, approvalThreshold));
+        vault = address(
+            new MandateVault(msg.sender, executor, settlementToken, maxPerTx, dailyCap, expiry, approvalThreshold)
+        );
         vaultOf[msg.sender] = vault;
         vaults.push(vault);
 

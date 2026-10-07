@@ -79,6 +79,11 @@ contract MandateVault {
     /// @notice Org controller. May be an EOA, a multisig, or an ERC-4337 smart account.
     address public immutable owner;
 
+    /// @notice Settlement token every agent can already spend. The org may still revoke it per
+    ///         agent through `setAllowedToken`, but a fresh agent never has to opt in to the
+    ///         platform's own token.
+    address public immutable settlementToken;
+
     bool internal _locked;
     bool public paused;
 
@@ -88,6 +93,11 @@ contract MandateVault {
     mapping(address agent => Policy) public policies;
     mapping(address agent => mapping(address target => ServicePolicy)) public services;
     mapping(address agent => mapping(address token => bool)) public allowedTokens;
+
+    /// @dev Whether the settlement token was already default-granted for an agent. Guards `setAgent`
+    ///      so a deliberate `setAllowedToken(..., false)` revocation is never re-granted by a later
+    ///      disable/re-enable cycle.
+    mapping(address agent => bool) private _settlementGranted;
     mapping(bytes32 requestId => Request) public requests;
     mapping(bytes32 requestId => mapping(address approver => bool)) public approvedBy;
 
@@ -203,6 +213,7 @@ contract MandateVault {
     constructor(
         address owner_,
         address executor_,
+        address settlementToken_,
         uint256 maxPerTx,
         uint256 dailyCap,
         uint64 expiry,
@@ -213,10 +224,15 @@ contract MandateVault {
         _requireFutureExpiry(expiry);
 
         owner = owner_;
+        settlementToken = settlementToken_;
         if (executor_ != address(0)) executors[executor_] = true;
 
-        // The org wallet doubles as the first agent so a treasury is usable immediately.
+        // The org wallet doubles as the first agent so a treasury is usable immediately, and it
+        // can already spend the settlement token: the platform token is allowed by default, not
+        // something an owner must remember to add after every agent registration.
         agents[owner_] = true;
+        allowedTokens[owner_][settlementToken_] = true;
+        _settlementGranted[owner_] = true;
         policies[owner_] = Policy({
             maxPerTx: maxPerTx,
             dailyCap: dailyCap,
@@ -246,8 +262,16 @@ contract MandateVault {
 
     /// @notice Register or deregister an agent. A deregistered agent keeps its history but can
     ///         neither request nor execute spends.
+    ///
+    ///         A newly registered agent can already spend the settlement token. This is erased the
+    ///         moment the owner revokes it for that agent and is not re-granted by a later
+    ///         re-enable, so a deliberate revocation is never silently undone.
     function setAgent(address agent, bool enabled) external onlyOwner {
         if (agent == address(0)) revert NotAgent();
+        if (enabled && !agents[agent] && !_settlementGranted[agent]) {
+            allowedTokens[agent][settlementToken] = true;
+            _settlementGranted[agent] = true;
+        }
         agents[agent] = enabled;
         emit AgentSet(agent, enabled);
     }

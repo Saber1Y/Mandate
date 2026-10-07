@@ -24,7 +24,7 @@ contract MandateVaultFactoryTest is Test {
     function setUp() public {
         vm.warp(START);
         usdt = new MockUSD();
-        factory = new MandateVaultFactory(executor);
+        factory = new MandateVaultFactory(executor, address(usdt));
     }
 
     function create(address org, uint8 threshold) internal returns (address vault) {
@@ -61,6 +61,42 @@ contract MandateVaultFactoryTest is Test {
         assertTrue(p.active);
         assertEq(p.spentToday, 0);
         assertEq(vault.paused(), false);
+    }
+
+    function test_NewVaultDefaultsToSettlementToken() public {
+        MandateVault vault = MandateVault(payable(create(orgA, 1)));
+
+        assertEq(vault.settlementToken(), address(usdt), "factory settlement token wired");
+        assertTrue(vault.allowedTokens(orgA, address(usdt)), "first agent can already spend tUSDT");
+    }
+
+    function test_NewlyRegisteredAgentDefaultsToSettlementToken() public {
+        MandateVault vault = MandateVault(payable(create(orgA, 1)));
+
+        vm.prank(orgA);
+        vault.setAgent(agentA, true);
+
+        assertTrue(vault.agents(agentA));
+        assertTrue(vault.allowedTokens(agentA, address(usdt)), "no manual allow step for a new agent");
+    }
+
+    function test_RevokedSettlementTokenSurvivesReenable() public {
+        MandateVault vault = MandateVault(payable(create(orgA, 1)));
+
+        vm.startPrank(orgA);
+        vault.setAgent(agentA, true);
+        assertTrue(vault.allowedTokens(agentA, address(usdt)), "granted by default");
+
+        // A deliberate revocation sticks: disabling and re-enabling the agent must not resurrect it.
+        vault.setAllowedToken(agentA, address(usdt), false);
+        assertFalse(vault.allowedTokens(agentA, address(usdt)));
+        vault.setAgent(agentA, false);
+        vm.stopPrank();
+
+        vm.prank(orgA);
+        vault.setAgent(agentA, true);
+        assertTrue(vault.agents(agentA));
+        assertFalse(vault.allowedTokens(agentA, address(usdt)), "revocation is not undone by re-enable");
     }
 
     function test_Revert_OneVaultPerOrg() public {

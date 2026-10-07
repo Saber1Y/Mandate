@@ -8,7 +8,8 @@ import {MandateVaultFactory} from "../src/MandateVaultFactory.sol";
 ///
 /// @dev Usage:
 ///        export PRIVATE_KEY=0x...
-///        export MANDATE_EXECUTOR_ADDRESS=0x...   # optional, defaults to the deployer
+///        export MANDATE_EXECUTOR_ADDRESS=0x...      # optional, defaults to the deployer
+///        export MANDATE_SETTLEMENT_TOKEN=0x...tUSDT # optional, defaults to tUSDT on Bohr
 ///        forge script script/DeployMandateFactory.s.sol \
 ///          --rpc-url https://rpc.bohr.life --broadcast
 ///
@@ -19,6 +20,9 @@ import {MandateVaultFactory} from "../src/MandateVaultFactory.sol";
 contract DeployMandateFactory is Script {
     uint256 internal constant BOT_CHAIN_ID = 968;
 
+    /// @notice tUSDT on BOT Chain Bohr Testnet.
+    address internal constant TUSDT = 0x75edC9335175Fc0552D51D48439F229c10420fe3;
+
     error WrongChain(uint256 actual);
 
     function run() external returns (MandateVaultFactory factory) {
@@ -27,14 +31,16 @@ contract DeployMandateFactory is Script {
         uint256 deployerKey = vm.envUint("PRIVATE_KEY");
         address deployer = vm.addr(deployerKey);
         address executor = vm.envOr("MANDATE_EXECUTOR_ADDRESS", deployer);
+        address token = vm.envOr("MANDATE_SETTLEMENT_TOKEN", TUSDT);
 
         vm.startBroadcast(deployerKey);
-        factory = new MandateVaultFactory(executor);
+        factory = new MandateVaultFactory(executor, token);
         vm.stopBroadcast();
 
-        console2.log("MandateVaultFactory :", address(factory));
-        console2.log("deployer            :", deployer);
-        console2.log("executor (gas-only) :", executor);
-        console2.log("chainid             :", block.chainid);
+        console2.log("MandateVaultFactory    :", address(factory));
+        console2.log("deployer               :", deployer);
+        console2.log("executor (gas-only)    :", executor);
+        console2.log("settlement token       :", token);
+        console2.log("chainid                :", block.chainid);
     }
 }
