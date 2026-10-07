@@ -56,6 +56,41 @@ export function handoffStorageKey(vault: string): string {
   return `${HANDOFF_STORAGE_PREFIX}.${vault.toLowerCase()}`;
 }
 
+/**
+ * The vault-creation receipt.
+ *
+ * createVault is a single, irreversible transaction, and its hash is the only on-chain receipt the
+ * treasury has for coming into existence. It is captured in this browser the moment the creation
+ * write confirms and included in the handoff, so the receiving agent gets told where its treasury
+ * came from instead of a bare address. Scoped to the owner address because one address owns one
+ * vault - the same mapping the factory enforces - and the vault itself only resolves after the
+ * creation transaction lands.
+ */
+const CREATION_RECEIPT_PREFIX = "mandate.creation";
+
+export function creationReceiptKey(owner: string): string {
+  return `${CREATION_RECEIPT_PREFIX}.${owner.toLowerCase()}`;
+}
+
+export function loadStoredCreationReceipt(owner: string): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    return window.localStorage.getItem(creationReceiptKey(owner)) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export function saveStoredCreationReceipt(owner: string, txHash: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(creationReceiptKey(owner), txHash);
+  } catch {
+    // Quota/availability failures must not fail a creation; the receipt is a nice-to-have in the
+    // handoff, never a requirement for it.
+  }
+}
+
 export function loadStoredHandoff(vault: string): string | undefined {
   if (typeof window === "undefined") return undefined;
   try {
@@ -89,9 +124,9 @@ export function clearStoredHandoff(vault: string): void {
  */
 export function agentHandoffPrompt(
   leash: HandoffLeash,
-  context: {baseUrl: string; apiKey: string},
+  context: {baseUrl: string; apiKey: string; creationReceipt?: string},
 ): string {
-  const {baseUrl, apiKey} = context;
+  const {baseUrl, apiKey, creationReceipt} = context;
   const dec = 6;
   const maxTx = plain(leash.maxPerTx, dec);
   const cap = plain(leash.dailyCap, dec);
@@ -117,13 +152,17 @@ export function agentHandoffPrompt(
           .join("\n")
       : "- none - every payment attempt will be rejected until an owner allowlists a recipient";
 
+  const creationLine = creationReceipt
+    ? `Vault created in transaction ${creationReceipt}; you can look the treasury up from there.`
+    : "";
+
   return `You are the spending agent for a Mandate treasury. Everything you can do is decided on-chain
 before it happens; this prompt is your operating brief, not a request to be obeyed blindly.
 
 API base URL: ${baseUrl}
 Agent address: ${leash.agent}
 Vault: ${leash.vault}
-API key: ${apiKey}
+${creationReceipt ? `${creationLine}\n` : ""}API key: ${apiKey}
 
 YOUR LEASH (enforced by the vault, not by you)
 - Max per transaction: ${maxTx} ${leash.tokenSymbol}

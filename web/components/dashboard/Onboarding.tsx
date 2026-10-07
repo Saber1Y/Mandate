@@ -1,6 +1,7 @@
 "use client";
 
 import {useCallback, useEffect, useState} from "react";
+import type {Hex} from "viem";
 import {BOT_CHAIN_ID, BOT_EXPLORER_URL, mandateFactory} from "@/lib/bot";
 import {mandateVaultFactoryAbi} from "@/lib/abi/mandate";
 import {tryParseTusdt, truncateAddress} from "@/lib/format";
@@ -14,6 +15,7 @@ import {
 import {usePrivyWalletClient} from "@/lib/usePrivyWallet";
 import {useOwnerWrite} from "@/lib/useOwnerWrite";
 import {useVault} from "@/lib/useVault";
+import {saveStoredCreationReceipt} from "@/lib/handoff";
 import {Panel} from "@/components/dashboard/Panel";
 import {Button} from "@/components/ui/Button";
 import {Field, TextInput} from "@/components/ui/Input";
@@ -33,7 +35,7 @@ import {Field, TextInput} from "@/components/ui/Input";
  */
 export function Onboarding() {
   const {vault, checked, refetch} = useVault();
-  const {getClient} = usePrivyWalletClient();
+  const {getClient, address} = usePrivyWalletClient();
 
   const [maxPerTx, setMaxPerTx] = useState("100");
   const [dailyCap, setDailyCap] = useState("1000");
@@ -48,7 +50,15 @@ export function Onboarding() {
     if (vault) refetch();
   }, [vault, refetch]);
 
-  const onCreated = useCallback(() => refetch(), [refetch]);
+  // capture the creation transaction the moment it confirms and keep it for the handoff, keyed to
+  // the owner because one address owns one vault and at this point the vault has not resolved yet.
+  const onCreated = useCallback(
+    (txHash?: Hex) => {
+      if (txHash && address) saveStoredCreationReceipt(address, txHash);
+      refetch();
+    },
+    [refetch, address],
+  );
   const create = useOwnerWrite(onCreated);
 
   // Surface wallet-connection problems before the user fills in a form they cannot submit.

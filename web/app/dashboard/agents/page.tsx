@@ -20,7 +20,7 @@ import {
 } from "@/lib/format";
 import {explorerAddress, publicClient} from "@/lib/chain";
 import {readServiceAllowlist, type ServiceAllowlistEntry} from "@/lib/reads";
-import {agentHandoffPrompt, clearStoredHandoff, loadStoredHandoff, saveStoredHandoff} from "@/lib/handoff";
+import {agentHandoffPrompt, clearStoredHandoff, loadStoredHandoff, saveStoredHandoff, loadStoredCreationReceipt} from "@/lib/handoff";
 import {useTreasuryState} from "@/lib/useChainRead";
 import {useOwnerWrite} from "@/lib/useOwnerWrite";
 import {useWalletMessageSigner, useActiveAddress} from "@/lib/usePrivyWallet";
@@ -683,7 +683,7 @@ function CredentialManager({vault, agent, disabled}: {vault: Address; agent?: `0
 const buildHandoff = useCallback(
   async (apiKey: string, agent: Address) => {
     try {
-      const [policy, remaining, allowlist] = await Promise.all([
+      const [policy, remaining, allowlist, owner] = await Promise.all([
         publicClient.readContract({
           address: vault,
           abi: mandateVaultAbi,
@@ -697,8 +697,14 @@ const buildHandoff = useCallback(
           args: [agent],
         }),
         readServiceAllowlist({vault, agent}).catch(() => []),
+        publicClient.readContract({
+          address: vault,
+          abi: mandateVaultAbi,
+          functionName: "owner",
+        }),
       ]);
       const baseUrl = typeof window === "undefined" ? "" : window.location.origin;
+      const creationReceipt = loadStoredCreationReceipt(owner as Address);
       const prompt = agentHandoffPrompt(
         {
           agent,
@@ -714,7 +720,7 @@ const buildHandoff = useCallback(
             .map((r) => ({address: r.target, label: r.label, maxPerTx: r.maxPerTx})),
           vault,
         },
-        {baseUrl, apiKey},
+        {baseUrl, apiKey, creationReceipt},
       );
       setHandoff(prompt);
       saveStoredHandoff(vault, prompt);
